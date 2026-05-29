@@ -15,9 +15,17 @@ def _now():
 
 def create_access_token(user):
     now = _now()
+    # include role in access token if available
+    role = None
+    try:
+        role = getattr(user, "profile").role
+    except Exception:
+        role = None
+
     payload = {
         "user_id": user.id,
         "type": "access",
+        "role": role,
         "exp": now + ACCESS_TOKEN_LIFETIME,
         "iat": now,
     }

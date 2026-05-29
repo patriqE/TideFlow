@@ -1,55 +1,56 @@
-# TideFlow Backend
+## About TideFlow
 
-This folder contains a Django project with a FastAPI gateway mounted on the same ASGI application.
+TideFlow is a backend service for coordinating passenger flows and deck operations for small ferry or shuttle services. It provides user accounts, role-based access (Passenger, Deck Agent, Admin), and a lightweight API gateway for future mobile and web clients.
 
-## Layout
+Key capabilities:
 
-- Django serves the core app and root health check.
-- FastAPI is mounted under `/api` for gateway-style endpoints.
+- User registration and authentication (email/phone + password)
+- JWT-based access + refresh token session management
+- Role management: `PASSENGER`, `DECK_AGENT`, `ADMIN`
+- FastAPI gateway mounted on top of a Django ASGI app for incremental API development
 
-## Local run
+Tech stack:
 
-1. Create and activate a virtual environment.
-2. Install dependencies:
+- Python 3.x, Django (project core)
+- FastAPI (mounted under `/api`) for gateway endpoints
+- SQLite by default for local development (configurable)
 
-   ```bash
-   pip install -r backend/requirements.txt
-   ```
+Quickstart (local):
 
-3. Apply Django migrations:
-
-   ```bash
-   cd backend
-   python manage.py migrate
-   ```
-
-4. Start Django directly:
-
-   ```bash
-   cd backend
-   python manage.py runserver
-   ```
-
-5. Or run the combined ASGI app:
-
-   ```bash
-   cd backend
-   uvicorn tideflow_backend.asgi:application --reload
-   ```
-
-## Docker run
-
-Start the backend in a container with live reload:
+1. Create a virtual environment and install dependencies:
 
 ```bash
 cd backend
-docker compose up --build
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-The service will be available at `http://localhost:8000`.
+2. Prepare the database and apply migrations:
 
-## Endpoints
+```bash
+python manage.py makemigrations
+python manage.py migrate
+```
 
-- `GET /health/` - Django health check
-- `GET /api/health` - FastAPI gateway health check
-- `POST /api/forward` - gateway scaffold endpoint
+3. Create a superuser (optional):
+
+```bash
+python manage.py createsuperuser
+```
+
+4. Run the development server:
+
+```bash
+python manage.py runserver
+```
+
+Operation notes:
+
+- The FastAPI gateway is mounted under `/api` by the ASGI app. Health endpoints:
+  - `GET /health/` (Django)
+  - `GET /api/health` (FastAPI)
+- Account endpoints live under the Django app routes. See `backend/accounts/urls.py` for the exact paths (register, login, refresh, logout, set-role).
+- Apply migrations before exercising `Profile.role` and `Session` features.
+
+If you want to see how TideFlow was built (design decisions and staged work), see `DEVELOPMENT.md`.

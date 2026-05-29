@@ -8,6 +8,17 @@ from .models import Profile
 from .auth import create_access_token, create_refresh_token, decode_token
 from .models import Session
 from django.utils import timezone
+from django.contrib.auth.decorators import user_passes_test
+from django.conf import settings
+
+
+
+def is_admin_user(user):
+    try:
+        return getattr(user, "profile").role == "ADMIN"
+    except Exception:
+        return False
+
 
 
 @csrf_exempt
@@ -40,8 +51,12 @@ def register(request):
     user.set_password(password)
     user.save()
 
+    # new users default to PASSENGER role
     if phone:
         Profile.objects.create(user=user, phone=phone)
+    else:
+        # ensure profile exists even without phone
+        Profile.objects.create(user=user)
 
     return JsonResponse({"id": user.id, "email": user.email, "phone": phone}, status=201)
 
@@ -85,7 +100,13 @@ def login(request):
     # store session
     Session.objects.create(user=user, jti=jti, expires_at=expires_at)
 
-    return JsonResponse({"access": access, "refresh": refresh}, status=200)
+    role = None
+    try:
+        role = getattr(user, "profile").role
+    except Exception:
+        role = None
+
+    return JsonResponse({"access": access, "refresh": refresh, "role": role}, status=200)
 
 
 @csrf_exempt
@@ -138,3 +159,55 @@ def logout(request):
     jti = payload.get("jti")
     Session.objects.filter(jti=jti).update(revoked=True)
     return JsonResponse({"detail": "Logged out"}, status=200)
+
+
+@csrf_exempt
+def set_role(request):
+    """Admin-only endpoint to set another user's role.
+
+    Payload: { "user_id": <id>, "role": "DECK_AGENT" }
+    """
+    # require admin
+    if not getattr(request, "user", None) or not getattr(request.user, "is_authenticated", False):
+        return JsonResponse({"detail": "Authentication required"}, status=401)
+
+    # Only allow admins (superuser OR profile role ADMIN)
+    if not (request.user.is_superuser or is_admin_user(request.user)):
+        return JsonResponse({"detail": "Admin privileges required"}, status=403)
+
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    try:
+        data = json.loads(request.body.decode())
+    except Exception:
+        return JsonResponse({"detail": "Invalid JSON payload"}, status=400)
+
+    user_id = data.get("user_id")
+    role = data.get("role")
+    if not user_id or not role:
+        return JsonResponse({"detail": "Provide user_id and role"}, status=400)
+
+    User = get_user_model()
+    try:
+        target = User.objects.get(id=user_id)
+    except User.DoesNotExist:
+        return JsonResponse({"detail": "User not found"}, status=404)
+
+    # ensure profile exists
+    prof, _ = Profile.objects.get_or_create(user=target)
+    prof.role = role
+    prof.save()
+
+    # map ADMIN to Django superuser flags
+    if role == Profile.ROLE_ADMIN:
+        target.is_staff = True
+        target.is_superuser = True
+    else:
+        # if role removed from admin, clear superuser/staff flags
+        target.is_superuser = False
+        target.is_staff = False
+    target.save()
+
+    return JsonResponse({"detail": "Role updated", "user_id": target.id, "role": prof.role}, status=200)
+
