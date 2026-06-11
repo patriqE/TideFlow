@@ -8,6 +8,7 @@ Key capabilities:
 - JWT-based access + refresh token session management
 - Role management: `PASSENGER`, `DECK_AGENT`, `ADMIN`
 - Admin CRUD for boat routes, schedules, and schedule capacity
+- Passenger rides view for date/time/price lookup under `/fleet/rides/`
 - FastAPI gateway mounted on top of a Django ASGI app for incremental API development
 
 Tech stack:
@@ -53,6 +54,7 @@ Operation notes:
   - `GET /api/health` (FastAPI)
 - Account endpoints live under the Django app routes. See `backend/accounts/urls.py` for the exact paths (register, login, refresh, logout, set-role).
 - Fleet admin endpoints live under `backend/fleet/urls.py` and are mounted at `/fleet/`.
+- Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
 - Apply migrations before exercising `Profile.role` and `Session` features.
 
 If you want to see how TideFlow was built (design decisions and staged work), see `DEVELOPMENT.md`.

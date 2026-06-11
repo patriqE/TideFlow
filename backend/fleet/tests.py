@@ -5,6 +5,8 @@ from django.urls import reverse
 from accounts.auth import create_access_token
 from accounts.models import Profile
 
+from .models import BoatRoute, BoatSchedule, ScheduleCapacity
+
 
 class FleetCrudTests(TestCase):
     def setUp(self):
@@ -29,12 +31,14 @@ class FleetCrudTests(TestCase):
                 "route_id": route_id,
                 "departure_time": "08:30:00",
                 "arrival_time": "09:00:00",
+                "price": "12.50",
                 "days_of_week": ["Mon", "Wed", "Fri"],
             },
             content_type="application/json",
             **self.headers,
         )
         self.assertEqual(schedule_response.status_code, 201)
+        self.assertEqual(schedule_response.json()["price"], "12.50")
         schedule_id = schedule_response.json()["id"]
 
         capacity_response = self.client.post(
@@ -57,3 +61,35 @@ class FleetCrudTests(TestCase):
 
         response = self.client.get(reverse("fleet_route_collection"), **headers)
         self.assertEqual(response.status_code, 403)
+
+    def test_available_rides_filters_by_date_and_time(self):
+        route = BoatRoute.objects.create(name="Harbor Express", origin="Dock 1", destination="Dock 9")
+        BoatSchedule.objects.create(
+            route=route,
+            departure_time="08:00:00",
+            arrival_time="08:45:00",
+            price="15.00",
+            days_of_week=["thu", "sat"],
+        )
+        BoatSchedule.objects.create(
+            route=route,
+            departure_time="10:30:00",
+            arrival_time="11:15:00",
+            price="18.00",
+            days_of_week=["thu", "sat"],
+        )
+        BoatSchedule.objects.create(
+            route=route,
+            departure_time="13:00:00",
+            arrival_time="13:45:00",
+            price="21.00",
+            days_of_week=["mon"],
+        )
+
+        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11", "time": "09:00:00"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["date"], "2026-06-11")
+        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(body["results"][0]["departure_time"], "10:30:00")
+        self.assertEqual(body["results"][0]["price"], "18.00")

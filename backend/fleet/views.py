@@ -1,5 +1,7 @@
 import json
 from functools import wraps
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError
 from django.http import JsonResponse
@@ -63,6 +65,24 @@ def _parse_time_value(value, field_name):
     return parsed_value, None
 
 
+def _parse_date_value(value):
+    if not value:
+        return None, "Provide date"
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date(), None
+    except ValueError:
+        return None, "date must be in YYYY-MM-DD format"
+
+
+def _parse_decimal_value(value, field_name, default=None):
+    if value is None:
+        return default, None
+    try:
+        return Decimal(str(value)), None
+    except (InvalidOperation, ValueError, TypeError):
+        return None, f"{field_name} must be a valid number"
+
+
 def _route_payload(route):
     return {
         "id": route.id,
@@ -98,12 +118,31 @@ def _schedule_payload(schedule):
         "route_id": schedule.route_id,
         "departure_time": schedule.departure_time.isoformat(),
         "arrival_time": schedule.arrival_time.isoformat(),
+        "price": str(schedule.price),
         "days_of_week": schedule.days_of_week,
         "is_active": schedule.is_active,
         "capacity": _capacity_payload(capacity) if capacity else None,
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),
     }
+
+
+def _passenger_ride_payload(schedule, ride_date):
+    payload = _schedule_payload(schedule)
+    payload.update(
+        {
+            "ride_date": ride_date.isoformat(),
+            "weekday": ride_date.strftime("%a"),
+        }
+    )
+    return payload
+
+
+def _schedule_matches_date(schedule, ride_date):
+    weekday_short = ride_date.strftime("%a")
+    weekday_long = ride_date.strftime("%A")
+    normalized_days = {str(day).strip().lower() for day in schedule.days_of_week}
+    return weekday_short.lower() in normalized_days or weekday_long.lower() in normalized_days
 
 
 @csrf_exempt
@@ -205,21 +244,25 @@ def schedule_collection(request):
     route_id = data.get("route_id")
     departure_time, departure_error = _parse_time_value(data.get("departure_time"), "departure_time")
     arrival_time, arrival_error = _parse_time_value(data.get("arrival_time"), "arrival_time")
+    price, price_error = _parse_decimal_value(data.get("price"), "price", Decimal("0.00"))
     days_of_week = _parse_days_of_week(data.get("days_of_week"))
     is_active = data.get("is_active", True)
 
     if not route_id or days_of_week is None:
-        return JsonResponse({"detail": "Provide route_id, departure_time, arrival_time, and days_of_week"}, status=400)
+        return JsonResponse({"detail": "Provide route_id, departure_time, arrival_time, days_of_week, and price"}, status=400)
     if departure_error:
         return JsonResponse({"detail": departure_error}, status=400)
     if arrival_error:
         return JsonResponse({"detail": arrival_error}, status=400)
+    if price_error:
+        return JsonResponse({"detail": price_error}, status=400)
 
     route = get_object_or_404(BoatRoute, id=route_id)
     schedule = BoatSchedule.objects.create(
         route=route,
         departure_time=departure_time,
         arrival_time=arrival_time,
+        price=price,
         days_of_week=days_of_week,
         is_active=bool(is_active),
     )
@@ -251,6 +294,11 @@ def schedule_detail(request, schedule_id):
             if error:
                 return JsonResponse({"detail": error}, status=400)
             schedule.arrival_time = parsed_arrival_time
+        if "price" in data:
+            parsed_price, error = _parse_decimal_value(data.get("price"), "price")
+            if error:
+                return JsonResponse({"detail": error}, status=400)
+            schedule.price = parsed_price
         if "days_of_week" in data:
             parsed_days = _parse_days_of_week(data.get("days_of_week"))
             if parsed_days is None:
@@ -267,6 +315,39 @@ def schedule_detail(request, schedule_id):
         return JsonResponse({"detail": "Schedule deleted"}, status=200)
 
     return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+def available_rides(request):
+    if request.method != "GET":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    ride_date, date_error = _parse_date_value(request.GET.get("date"))
+    if date_error:
+        return JsonResponse({"detail": date_error}, status=400)
+
+    requested_time = request.GET.get("time")
+    parsed_time = None
+    if requested_time:
+        parsed_time, time_error = _parse_time_value(requested_time, "time")
+        if time_error:
+            return JsonResponse({"detail": time_error}, status=400)
+
+    rides = (
+        BoatSchedule.objects.select_related("route", "capacity")
+        .filter(is_active=True, route__is_active=True)
+        .order_by("departure_time", "route__name")
+    )
+
+    matching_rides = []
+    for ride in rides:
+        if not _schedule_matches_date(ride, ride_date):
+            continue
+        if parsed_time and ride.departure_time < parsed_time:
+            continue
+        matching_rides.append(_passenger_ride_payload(ride, ride_date))
+
+    return JsonResponse({"date": ride_date.isoformat(), "results": matching_rides}, status=200)
 
 
 @csrf_exempt

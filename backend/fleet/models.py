@@ -18,6 +18,7 @@ class BoatSchedule(models.Model):
     route = models.ForeignKey(BoatRoute, on_delete=models.CASCADE, related_name="schedules")
     departure_time = models.TimeField()
     arrival_time = models.TimeField()
+    price = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     days_of_week = models.JSONField(default=list, blank=True)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
