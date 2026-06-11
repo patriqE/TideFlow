@@ -1,11 +1,31 @@
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
+from unittest.mock import patch
 
 from accounts.auth import create_access_token
 from accounts.models import Profile
 
 from .models import BoatRoute, BoatSchedule, ScheduleCapacity
+
+
+class FakeRedisClient:
+    def __init__(self):
+        self.storage = {}
+
+    def ping(self):
+        return True
+
+    def set(self, key, value):
+        self.storage[key] = str(value)
+        return True
+
+    def get(self, key):
+        return self.storage.get(key)
+
+    def delete(self, key):
+        self.storage.pop(key, None)
+        return 1
 
 
 class FleetCrudTests(TestCase):
@@ -93,3 +113,25 @@ class FleetCrudTests(TestCase):
         self.assertEqual(len(body["results"]), 1)
         self.assertEqual(body["results"][0]["departure_time"], "10:30:00")
         self.assertEqual(body["results"][0]["price"], "18.00")
+
+    @patch("fleet.availability.get_redis_client")
+    def test_available_rides_uses_redis_seat_availability(self, mock_get_redis_client):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        route = BoatRoute.objects.create(name="Bay Shuttle", origin="Harbor", destination="Island")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="07:15:00",
+            arrival_time="07:45:00",
+            price="9.50",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=42, max_cargo_kg=500)
+
+        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(body["results"][0]["available_seats"], 42)
+        self.assertEqual(fake_client.get("tideflow:seat-availability:schedule:1"), "42")

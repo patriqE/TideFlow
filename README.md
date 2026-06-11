@@ -9,6 +9,7 @@ Key capabilities:
 - Role management: `PASSENGER`, `DECK_AGENT`, `ADMIN`
 - Admin CRUD for boat routes, schedules, and schedule capacity
 - Passenger rides view for date/time/price lookup under `/fleet/rides/`
+- Redis-backed seat availability for live passenger ride responses
 - FastAPI gateway mounted on top of a Django ASGI app for incremental API development
 
 Tech stack:
@@ -55,6 +56,7 @@ Operation notes:
 - Account endpoints live under the Django app routes. See `backend/accounts/urls.py` for the exact paths (register, login, refresh, logout, set-role).
 - Fleet admin endpoints live under `backend/fleet/urls.py` and are mounted at `/fleet/`.
 - Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
+- Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
 - Apply migrations before exercising `Profile.role` and `Session` features.
 
 If you want to see how TideFlow was built (design decisions and staged work), see `DEVELOPMENT.md`.

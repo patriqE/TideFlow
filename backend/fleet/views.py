@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.models import Profile
 
+from .availability import clear_schedule_availability, get_schedule_available_seats, seed_schedule_availability
 from .models import BoatRoute, BoatSchedule, ScheduleCapacity
 
 
@@ -112,6 +113,7 @@ def _capacity_payload(capacity):
 
 def _schedule_payload(schedule):
     capacity = getattr(schedule, "capacity", None)
+    available_seats = get_schedule_available_seats(schedule)
     return {
         "id": schedule.id,
         "route": _route_payload(schedule.route),
@@ -121,6 +123,7 @@ def _schedule_payload(schedule):
         "price": str(schedule.price),
         "days_of_week": schedule.days_of_week,
         "is_active": schedule.is_active,
+        "available_seats": available_seats,
         "capacity": _capacity_payload(capacity) if capacity else None,
         "created_at": schedule.created_at.isoformat(),
         "updated_at": schedule.updated_at.isoformat(),
@@ -311,6 +314,7 @@ def schedule_detail(request, schedule_id):
         return JsonResponse(_schedule_payload(schedule), status=200)
 
     if request.method == "DELETE":
+        clear_schedule_availability(schedule.id)
         schedule.delete()
         return JsonResponse({"detail": "Schedule deleted"}, status=200)
 
@@ -385,6 +389,8 @@ def capacity_collection(request):
         )
     except IntegrityError:
         return JsonResponse({"detail": "That schedule already has capacity configured"}, status=400)
+
+    seed_schedule_availability(schedule)
     return JsonResponse(_capacity_payload(capacity), status=201)
 
 
@@ -414,9 +420,12 @@ def capacity_detail(request, capacity_id):
             capacity.save()
         except IntegrityError:
             return JsonResponse({"detail": "That schedule already has capacity configured"}, status=400)
+
+        seed_schedule_availability(capacity.schedule)
         return JsonResponse(_capacity_payload(capacity), status=200)
 
     if request.method == "DELETE":
+        clear_schedule_availability(capacity.schedule_id)
         capacity.delete()
         return JsonResponse({"detail": "Capacity deleted"}, status=200)
 
