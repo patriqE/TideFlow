@@ -3,6 +3,7 @@ from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.db import IntegrityError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -11,8 +12,14 @@ from django.views.decorators.csrf import csrf_exempt
 
 from accounts.models import Profile
 
-from .availability import clear_schedule_availability, get_schedule_available_seats, seed_schedule_availability
-from .models import BoatRoute, BoatSchedule, ScheduleCapacity
+from .availability import (
+    clear_schedule_availability,
+    get_schedule_available_seats,
+    release_schedule_seats,
+    reserve_schedule_seats,
+    seed_schedule_availability,
+)
+from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
 
 
 def _is_admin_user(user):
@@ -75,6 +82,17 @@ def _parse_date_value(value):
         return None, "date must be in YYYY-MM-DD format"
 
 
+def _parse_integer_value(value, field_name, minimum=1):
+    try:
+        parsed_value = int(value)
+    except (TypeError, ValueError):
+        return None, f"{field_name} must be a whole number"
+
+    if parsed_value < minimum:
+        return None, f"{field_name} must be at least {minimum}"
+    return parsed_value, None
+
+
 def _parse_decimal_value(value, field_name, default=None):
     if value is None:
         return default, None
@@ -111,9 +129,9 @@ def _capacity_payload(capacity):
     }
 
 
-def _schedule_payload(schedule):
+def _schedule_payload(schedule, ride_date=None):
     capacity = getattr(schedule, "capacity", None)
-    available_seats = get_schedule_available_seats(schedule)
+    available_seats = get_schedule_available_seats(schedule, ride_date)
     return {
         "id": schedule.id,
         "route": _route_payload(schedule.route),
@@ -130,8 +148,23 @@ def _schedule_payload(schedule):
     }
 
 
+def _booking_payload(booking):
+    return {
+        "booking_code": str(booking.booking_code),
+        "id": booking.id,
+        "user_id": booking.user_id,
+        "schedule": _schedule_payload(booking.schedule, booking.ride_date),
+        "schedule_id": booking.schedule_id,
+        "ride_date": booking.ride_date.isoformat(),
+        "seat_count": booking.seat_count,
+        "status": booking.status,
+        "created_at": booking.created_at.isoformat(),
+        "updated_at": booking.updated_at.isoformat(),
+    }
+
+
 def _passenger_ride_payload(schedule, ride_date):
-    payload = _schedule_payload(schedule)
+    payload = _schedule_payload(schedule, ride_date)
     payload.update(
         {
             "ride_date": ride_date.isoformat(),
@@ -146,6 +179,29 @@ def _schedule_matches_date(schedule, ride_date):
     weekday_long = ride_date.strftime("%A")
     normalized_days = {str(day).strip().lower() for day in schedule.days_of_week}
     return weekday_short.lower() in normalized_days or weekday_long.lower() in normalized_days
+
+
+def _is_passenger_user(user):
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return False
+    try:
+        return getattr(user, "profile").role == Profile.ROLE_PASSENGER
+    except Exception:
+        return False
+
+
+def passenger_only(view_func):
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        if not getattr(request, "user", None) or not getattr(request.user, "is_authenticated", False):
+            return JsonResponse({"detail": "Authentication required"}, status=401)
+        if not _is_passenger_user(request.user):
+            return JsonResponse({"detail": "Passenger privileges required"}, status=403)
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
 
 
 @csrf_exempt
@@ -352,6 +408,79 @@ def available_rides(request):
         matching_rides.append(_passenger_ride_payload(ride, ride_date))
 
     return JsonResponse({"date": ride_date.isoformat(), "results": matching_rides}, status=200)
+
+
+@csrf_exempt
+@passenger_only
+def booking_collection(request):
+    if request.method == "GET":
+        bookings = Booking.objects.select_related("schedule", "schedule__route").filter(user=request.user).order_by("-created_at")
+        return JsonResponse({"results": [_booking_payload(booking) for booking in bookings]}, status=200)
+
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    data = _read_json(request)
+    if data is None:
+        return JsonResponse({"detail": "Invalid JSON payload"}, status=400)
+
+    schedule_id = data.get("schedule_id")
+    ride_date, date_error = _parse_date_value(data.get("ride_date"))
+    seat_count, seat_count_error = _parse_integer_value(data.get("seat_count", 1), "seat_count")
+
+    if not schedule_id:
+        return JsonResponse({"detail": "Provide schedule_id"}, status=400)
+    if date_error:
+        return JsonResponse({"detail": date_error}, status=400)
+    if seat_count_error:
+        return JsonResponse({"detail": seat_count_error}, status=400)
+
+    schedule = get_object_or_404(BoatSchedule.objects.select_related("route", "capacity"), id=schedule_id, is_active=True, route__is_active=True)
+    if not _schedule_matches_date(schedule, ride_date):
+        return JsonResponse({"detail": "Selected ride does not operate on that date"}, status=400)
+
+    reserved_seats = reserve_schedule_seats(schedule, ride_date, seat_count)
+    if reserved_seats is None:
+        if getattr(schedule, "capacity", None) is None:
+            return JsonResponse({"detail": "Seat availability is unavailable for this ride"}, status=503)
+        return JsonResponse({"detail": "Not enough seats available"}, status=409)
+
+    try:
+        with transaction.atomic():
+            booking = Booking.objects.create(
+                user=request.user,
+                schedule=schedule,
+                ride_date=ride_date,
+                seat_count=seat_count,
+                status=Booking.STATUS_PENDING,
+            )
+    except Exception:
+        release_schedule_seats(schedule, ride_date, seat_count)
+        raise
+
+    payload = _booking_payload(booking)
+    payload["available_seats_after_booking"] = reserved_seats
+    return JsonResponse(payload, status=201)
+
+
+@csrf_exempt
+@passenger_only
+def booking_detail(request, booking_code):
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code, user=request.user)
+
+    if request.method == "GET":
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    if request.method == "DELETE":
+        if booking.status == Booking.STATUS_CANCELLED:
+            return JsonResponse(_booking_payload(booking), status=200)
+
+        release_schedule_seats(booking.schedule, booking.ride_date, booking.seat_count)
+        booking.status = Booking.STATUS_CANCELLED
+        booking.save(update_fields=["status", "updated_at"])
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    return JsonResponse({"detail": "Method not allowed"}, status=405)
 
 
 @csrf_exempt

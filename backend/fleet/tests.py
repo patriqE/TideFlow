@@ -6,7 +6,7 @@ from unittest.mock import patch
 from accounts.auth import create_access_token
 from accounts.models import Profile
 
-from .models import BoatRoute, BoatSchedule, ScheduleCapacity
+from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
 
 
 class FakeRedisClient:
@@ -134,4 +134,82 @@ class FleetCrudTests(TestCase):
         body = response.json()
         self.assertEqual(len(body["results"]), 1)
         self.assertEqual(body["results"][0]["available_seats"], 42)
-        self.assertEqual(fake_client.get("tideflow:seat-availability:schedule:1"), "42")
+        self.assertEqual(fake_client.get(f"tideflow:seat-availability:schedule:{schedule.id}:2026-06-11"), "42")
+
+    @patch("fleet.availability.get_redis_client")
+    def test_passenger_can_create_pending_booking_and_release_seats_on_cancel(self, mock_get_redis_client):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-1@example.com",
+            email="passenger-1@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Sunset Ferry", origin="Dock A", destination="Dock B")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="18:00:00",
+            arrival_time="18:45:00",
+            price="25.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=10, max_cargo_kg=100)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 3},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        self.assertEqual(booking_response.status_code, 201)
+        booking_body = booking_response.json()
+        self.assertEqual(booking_body["status"], Booking.STATUS_PENDING)
+        self.assertEqual(booking_body["available_seats_after_booking"], 7)
+
+        booking_code = booking_body["booking_code"]
+        detail_response = self.client.get(reverse("fleet_booking_detail", args=[booking_code]), **passenger_headers)
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(detail_response.json()["status"], Booking.STATUS_PENDING)
+
+        cancel_response = self.client.delete(reverse("fleet_booking_detail", args=[booking_code]), **passenger_headers)
+        self.assertEqual(cancel_response.status_code, 200)
+        self.assertEqual(cancel_response.json()["status"], Booking.STATUS_CANCELLED)
+
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        self.assertEqual(rides_response.status_code, 200)
+        self.assertEqual(rides_response.json()["results"][0]["available_seats"], 10)
+
+    @patch("fleet.availability.get_redis_client")
+    def test_booking_requires_available_seats(self, mock_get_redis_client):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-2@example.com",
+            email="passenger-2@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Night Ferry", origin="Dock C", destination="Dock D")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="20:00:00",
+            arrival_time="20:45:00",
+            price="25.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=2, max_cargo_kg=100)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 3},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        self.assertEqual(booking_response.status_code, 409)
