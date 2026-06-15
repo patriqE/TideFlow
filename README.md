@@ -1,4 +1,4 @@
-## About TideFlow
+# About TideFlow
 
 TideFlow is a backend service for coordinating passenger flows and deck operations for small ferry or shuttle services. It provides user accounts, role-based access (Passenger, Deck Agent, Admin), and a lightweight API gateway for future mobile and web clients.
 
@@ -11,6 +11,7 @@ Key capabilities:
 - Passenger rides view for date/time/price lookup under `/fleet/rides/`
 - Redis-backed seat availability for live passenger ride responses
 - Passenger pending bookings under `/fleet/bookings/`
+- Paystack checkout for booking payments and webhook confirmation
 - FastAPI gateway mounted on top of a Django ASGI app for incremental API development
 
 Tech stack:
@@ -30,20 +31,20 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Prepare the database and apply migrations:
+1. Prepare the database and apply migrations:
 
 ```bash
 python manage.py makemigrations
 python manage.py migrate
 ```
 
-3. Create a superuser (optional):
+1. Create a superuser (optional):
 
 ```bash
 python manage.py createsuperuser
 ```
 
-4. Run the development server:
+1. Run the development server:
 
 ```bash
 python manage.py runserver
@@ -59,6 +60,9 @@ Operation notes:
 - Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
 - Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
 - Create a pending booking with `POST /fleet/bookings/` using `schedule_id`, `ride_date`, and optional `seat_count`.
+- Initialize payment with `POST /fleet/bookings/<booking_code>/payment/`.
+- Handle Paystack webhooks at `POST /fleet/payments/webhook/`.
+- Set `PAYSTACK_SECRET_KEY` and `APP_BASE_URL` in the environment; webhook verification uses the same secret if `PAYSTACK_WEBHOOK_SECRET` is not set.
 - Apply migrations before exercising `Profile.role` and `Session` features.
 
 If you want to see how TideFlow was built (design decisions and staged work), see `DEVELOPMENT.md`.

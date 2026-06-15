@@ -60,6 +60,13 @@ class Booking(models.Model):
     ride_date = models.DateField()
     seat_count = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    payment_provider = models.CharField(max_length=20, default="paystack")
+    payment_status = models.CharField(max_length=20, default="PENDING")
+    payment_reference = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    payment_url = models.URLField(blank=True)
+    payment_currency = models.CharField(max_length=10, default="ngn")
+    payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    paid_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
