@@ -1,7 +1,9 @@
+import json
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
 from unittest.mock import patch
+from types import SimpleNamespace
 
 from accounts.auth import create_access_token
 from accounts.models import Profile
@@ -26,6 +28,48 @@ class FakeRedisClient:
     def delete(self, key):
         self.storage.pop(key, None)
         return 1
+
+
+class FakePaystackClient:
+    pass
+
+
+class FakePaystackSession(SimpleNamespace):
+    pass
+
+
+def fake_paystack_session():
+    return FakePaystackSession(
+        authorization_url="https://paystack.test/authorize",
+        access_code="ac_test_123",
+        reference="ref_test_123",
+    )
+
+
+def make_completed_event(booking_code):
+    return {
+        "type": "checkout.session.completed",
+        "data": {
+            "object": {
+                "id": "cs_test_123",
+                "client_reference_id": str(booking_code),
+                "metadata": {"booking_code": str(booking_code)},
+            }
+        },
+    }
+
+
+def make_failed_event(booking_code):
+    return {
+        "type": "checkout.session.expired",
+        "data": {
+            "object": {
+                "id": "cs_test_123",
+                "client_reference_id": str(booking_code),
+                "metadata": {"booking_code": str(booking_code)},
+            }
+        },
+    }
 
 
 class FleetCrudTests(TestCase):
@@ -213,3 +257,172 @@ class FleetCrudTests(TestCase):
             **passenger_headers,
         )
         self.assertEqual(booking_response.status_code, 409)
+
+    @patch("fleet.views.create_paystack_session")
+    @patch("fleet.availability.get_redis_client")
+    def test_passenger_can_initiate_paystack_payment_for_pending_booking(self, mock_get_redis_client, mock_create_paystack_session):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+        mock_create_paystack_session.return_value = (fake_paystack_session(), None)
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-3@example.com",
+            email="passenger-3@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Harbor Link", origin="Pier West", destination="Pier East")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="09:00:00",
+            arrival_time="09:40:00",
+            price="30.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=5, max_cargo_kg=200)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        booking_code = booking_response.json()["booking_code"]
+
+        payment_response = self.client.post(reverse("fleet_booking_payment", args=[booking_code]), **passenger_headers)
+        self.assertEqual(payment_response.status_code, 200)
+        body = payment_response.json()
+        self.assertEqual(body["payment_status"], "INITIATED")
+        self.assertEqual(body["authorization_url"], "https://paystack.test/authorize")
+        self.assertEqual(body["access_code"], "ac_test_123")
+        self.assertEqual(body["reference"], "ref_test_123")
+
+    @patch("fleet.views.parse_paystack_event")
+    @patch("fleet.availability.get_redis_client")
+    def test_paystack_webhook_confirms_booking_and_keeps_seats_reserved(self, mock_get_redis_client, mock_parse_webhook_event):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-4@example.com",
+            email="passenger-4@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Sunrise Ferry", origin="Dock X", destination="Dock Y")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="06:00:00",
+            arrival_time="06:45:00",
+            price="12.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=6, max_cargo_kg=100)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        booking_code = booking_response.json()["booking_code"]
+        mock_parse_webhook_event.return_value = (
+            {
+                "event": "charge.success",
+                "data": {
+                    "object": {
+                        "reference": booking_code,
+                        "metadata": {"booking_code": booking_code},
+                    }
+                },
+                "type": "charge.success",
+                "data": {
+                    "object": {
+                        "reference": booking_code,
+                        "metadata": {"booking_code": booking_code},
+                    }
+                },
+            },
+            None,
+        )
+
+        webhook_response = self.client.post(
+            reverse("fleet_payment_webhook"),
+            data=json.dumps({"event": "charge.success"}),
+            content_type="application/json",
+            HTTP_X_PAYSTACK_SIGNATURE="sig_test",
+        )
+        self.assertEqual(webhook_response.status_code, 200)
+
+        booking = Booking.objects.get(booking_code=booking_code)
+        self.assertEqual(booking.status, Booking.STATUS_CONFIRMED)
+        self.assertEqual(booking.payment_status, "SUCCEEDED")
+
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        self.assertEqual(rides_response.status_code, 200)
+        self.assertEqual(rides_response.json()["results"][0]["available_seats"], 4)
+
+    @patch("fleet.views.parse_paystack_event")
+    @patch("fleet.availability.get_redis_client")
+    def test_paystack_webhook_failure_releases_seats(self, mock_get_redis_client, mock_parse_webhook_event):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-5@example.com",
+            email="passenger-5@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Evening Ferry", origin="Dock M", destination="Dock N")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="19:00:00",
+            arrival_time="19:40:00",
+            price="18.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=4, max_cargo_kg=100)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        booking_code = booking_response.json()["booking_code"]
+        mock_parse_webhook_event.return_value = (
+            {
+                "event": "charge.abandoned",
+                "type": "charge.abandoned",
+                "data": {
+                    "object": {
+                        "reference": booking_code,
+                        "metadata": {"booking_code": booking_code},
+                    }
+                },
+            },
+            None,
+        )
+
+        webhook_response = self.client.post(
+            reverse("fleet_payment_webhook"),
+            data=json.dumps({"event": "charge.abandoned"}),
+            content_type="application/json",
+            HTTP_X_PAYSTACK_SIGNATURE="sig_test",
+        )
+        self.assertEqual(webhook_response.status_code, 200)
+
+        booking = Booking.objects.get(booking_code=booking_code)
+        self.assertEqual(booking.status, Booking.STATUS_CANCELLED)
+        self.assertEqual(booking.payment_status, "ABANDONED")
+
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        self.assertEqual(rides_response.status_code, 200)
+        self.assertEqual(rides_response.json()["results"][0]["available_seats"], 4)
