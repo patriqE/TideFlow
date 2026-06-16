@@ -92,6 +92,32 @@ def create_paystack_session(booking):
     ), None
 
 
+def verify_paystack_transaction(reference):
+    secret_key = get_paystack_secret_key()
+    if not secret_key:
+        return None, "Paystack is not configured"
+
+    request = Request(
+        f"{PAYSTACK_VERIFY_URL}{reference}",
+        headers={
+            "Authorization": f"Bearer {secret_key}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
+        return None, "Unable to verify Paystack payment"
+
+    if not body.get("status"):
+        return None, body.get("message") or "Paystack payment verification failed"
+
+    return body.get("data") or {}, None
+
+
 def verify_paystack_signature(payload, signature):
     webhook_secret = get_paystack_webhook_secret()
     if not webhook_secret:

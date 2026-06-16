@@ -426,3 +426,49 @@ class FleetCrudTests(TestCase):
         rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
         self.assertEqual(rides_response.status_code, 200)
         self.assertEqual(rides_response.json()["results"][0]["available_seats"], 4)
+
+    @patch("fleet.views.verify_paystack_transaction")
+    @patch("fleet.availability.get_redis_client")
+    def test_payment_success_callback_confirms_booking(self, mock_get_redis_client, mock_verify_paystack_transaction):
+        fake_client = FakeRedisClient()
+        mock_get_redis_client.return_value = fake_client
+
+        passenger = get_user_model().objects.create_user(
+            username="passenger-6@example.com",
+            email="passenger-6@example.com",
+            password="pass12345",
+        )
+        Profile.objects.create(user=passenger, role=Profile.ROLE_PASSENGER)
+        passenger_headers = {"HTTP_AUTHORIZATION": f"Bearer {create_access_token(passenger)}"}
+
+        route = BoatRoute.objects.create(name="Harbor Bay", origin="Pier 1", destination="Pier 2")
+        schedule = BoatSchedule.objects.create(
+            route=route,
+            departure_time="08:00:00",
+            arrival_time="08:40:00",
+            price="15.00",
+            days_of_week=["thu"],
+        )
+        ScheduleCapacity.objects.create(schedule=schedule, max_passengers=6, max_cargo_kg=100)
+
+        booking_response = self.client.post(
+            reverse("fleet_booking_collection"),
+            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            content_type="application/json",
+            **passenger_headers,
+        )
+        booking_code = booking_response.json()["booking_code"]
+
+        mock_verify_paystack_transaction.return_value = (
+            {"status": "success", "reference": "ref_test_456"},
+            None,
+        )
+
+        success_response = self.client.get(
+            reverse("payment-success"),
+            data={"booking_code": booking_code, "reference": "ref_test_456"},
+        )
+        self.assertEqual(success_response.status_code, 200)
+        booking = Booking.objects.get(booking_code=booking_code)
+        self.assertEqual(booking.status, Booking.STATUS_CONFIRMED)
+        self.assertEqual(booking.payment_status, "SUCCEEDED")
