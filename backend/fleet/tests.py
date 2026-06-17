@@ -1,4 +1,5 @@
 import json
+import hashlib
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from django.urls import reverse
@@ -44,6 +45,11 @@ def fake_paystack_session():
         access_code="ac_test_123",
         reference="ref_test_123",
     )
+
+
+def expected_booking_qr_code(booking_id, user_id):
+    checksum = hashlib.sha256(f"{booking_id}:{user_id}".encode("utf-8")).hexdigest()[:12].upper()
+    return f"TF|B:{booking_id}|P:{user_id}|C:{checksum}"
 
 
 def make_completed_event(booking_code):
@@ -213,11 +219,13 @@ class FleetCrudTests(TestCase):
         booking_body = booking_response.json()
         self.assertEqual(booking_body["status"], Booking.STATUS_PENDING)
         self.assertEqual(booking_body["available_seats_after_booking"], 7)
+        self.assertEqual(booking_body["qr_code"], expected_booking_qr_code(booking_body["id"], passenger.id))
 
         booking_code = booking_body["booking_code"]
         detail_response = self.client.get(reverse("fleet_booking_detail", args=[booking_code]), **passenger_headers)
         self.assertEqual(detail_response.status_code, 200)
         self.assertEqual(detail_response.json()["status"], Booking.STATUS_PENDING)
+        self.assertEqual(detail_response.json()["qr_code"], booking_body["qr_code"])
 
         cancel_response = self.client.delete(reverse("fleet_booking_detail", args=[booking_code]), **passenger_headers)
         self.assertEqual(cancel_response.status_code, 200)
@@ -298,6 +306,7 @@ class FleetCrudTests(TestCase):
         self.assertEqual(body["authorization_url"], "https://paystack.test/authorize")
         self.assertEqual(body["access_code"], "ac_test_123")
         self.assertEqual(body["reference"], "ref_test_123")
+        self.assertEqual(body["qr_code"], expected_booking_qr_code(body["id"], passenger.id))
 
     @patch("fleet.views.parse_paystack_event")
     @patch("fleet.availability.get_redis_client")

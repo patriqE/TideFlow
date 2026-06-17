@@ -1,4 +1,5 @@
 import json
+import hashlib
 from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -155,6 +156,7 @@ def _booking_payload(booking):
         "booking_code": str(booking.booking_code),
         "id": booking.id,
         "user_id": booking.user_id,
+        "qr_code": _booking_qr_code(booking),
         "schedule": _schedule_payload(booking.schedule, booking.ride_date),
         "schedule_id": booking.schedule_id,
         "ride_date": booking.ride_date.isoformat(),
@@ -170,6 +172,12 @@ def _booking_payload(booking):
         "created_at": booking.created_at.isoformat(),
         "updated_at": booking.updated_at.isoformat(),
     }
+
+
+def _booking_qr_code(booking):
+    checksum_source = f"{booking.id}:{booking.user_id}"
+    checksum = hashlib.sha256(checksum_source.encode("utf-8")).hexdigest()[:12].upper()
+    return f"TF|B:{booking.id}|P:{booking.user_id}|C:{checksum}"
 
 
 def _confirm_booking_payment(booking, payment_reference=None):
