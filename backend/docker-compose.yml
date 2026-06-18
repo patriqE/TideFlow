@@ -13,6 +13,8 @@ services:
       - .:/app
     environment:
       REDIS_URL: redis://redis:6379/0
+      PAYSTACK_SECRET_KEY: sk_test_8ffbd6aacbfe9d594149683e65bf06f1a8250daf
+      APP_BASE_URL: http://localhost:8000
     depends_on:
       - redis
     command: >

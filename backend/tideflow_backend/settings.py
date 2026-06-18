@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -67,3 +68,6 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REDIS_URL = "redis://redis:6379/0"
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_WEBHOOK_SECRET = os.environ.get("PAYSTACK_WEBHOOK_SECRET", PAYSTACK_SECRET_KEY)
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")

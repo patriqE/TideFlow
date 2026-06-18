@@ -5,6 +5,10 @@ from . import views
 
 urlpatterns = [
     path("rides/", views.available_rides, name="fleet_available_rides"),
+    path("bookings/", views.booking_collection, name="fleet_booking_collection"),
+    path("bookings/<uuid:booking_code>/", views.booking_detail, name="fleet_booking_detail"),
+    path("bookings/<uuid:booking_code>/payment/", views.booking_payment, name="fleet_booking_payment"),
+    path("payments/webhook/", views.payment_webhook, name="fleet_payment_webhook"),
     path("routes/", views.route_collection, name="fleet_route_collection"),
     path("routes/<int:route_id>/", views.route_detail, name="fleet_route_detail"),
     path("schedules/", views.schedule_collection, name="fleet_schedule_collection"),

@@ -1,3 +1,6 @@
+import uuid
+
+from django.conf import settings
 from django.db import models
 
 
@@ -38,3 +41,34 @@ class ScheduleCapacity(models.Model):
 
     def __str__(self) -> str:
         return f"Capacity for schedule {self.schedule_id}: {self.max_passengers} passengers"
+
+
+class Booking(models.Model):
+    STATUS_PENDING = "PENDING"
+    STATUS_CONFIRMED = "CONFIRMED"
+    STATUS_CANCELLED = "CANCELLED"
+
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_CONFIRMED, "Confirmed"),
+        (STATUS_CANCELLED, "Cancelled"),
+    ]
+
+    booking_code = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bookings")
+    schedule = models.ForeignKey(BoatSchedule, on_delete=models.CASCADE, related_name="bookings")
+    ride_date = models.DateField()
+    seat_count = models.PositiveIntegerField(default=1)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    payment_provider = models.CharField(max_length=20, default="paystack")
+    payment_status = models.CharField(max_length=20, default="PENDING")
+    payment_reference = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    payment_url = models.URLField(blank=True)
+    payment_currency = models.CharField(max_length=10, default="ngn")
+    payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    paid_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"Booking {self.booking_code} ({self.status})"
