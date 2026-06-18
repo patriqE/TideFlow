@@ -1,98 +1,190 @@
-import * as Device from 'expo-device';
-import { Platform, StyleSheet } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import React, { useRef, useState } from "react";
+import {
+  FlatList,
+  Pressable,
+  SafeAreaView,
+  StatusBar,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from "react-native";
+import { router } from "expo-router";
 
-import { AnimatedIcon } from '@/components/animated-icon';
-import { HintRow } from '@/components/hint-row';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { WebBadge } from '@/components/web-badge';
-import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
+import { slides } from "@/data/onboardingSlides";
+import { OnboardingSlide } from "@/components/OnboardingSlide";
 
-function getDevMenuHint() {
-  if (Platform.OS === 'web') {
-    return <ThemedText type="small">use browser devtools</ThemedText>;
-  }
-  if (Device.isDevice) {
-    return (
-      <ThemedText type="small">
-        shake device or press <ThemedText type="code">m</ThemedText> in terminal
-      </ThemedText>
-    );
-  }
-  const shortcut = Platform.OS === 'android' ? 'cmd+m (or ctrl+m)' : 'cmd+d';
+export default function OnboardingScreen() {
+  const { width } = useWindowDimensions();
+  const listRef = useRef<FlatList>(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const goToLogin = () => {
+    router.push("/login");
+  };
+
+  const handleNext = () => {
+    if (currentIndex < slides.length - 1) {
+      const nextIndex = currentIndex + 1;
+      setCurrentIndex(nextIndex);
+      listRef.current?.scrollToIndex({
+        index: nextIndex,
+        animated: true,
+      });
+      return;
+    }
+    goToLogin();
+  };
+
   return (
-    <ThemedText type="small">
-      press <ThemedText type="code">{shortcut}</ThemedText>
-    </ThemedText>
-  );
-}
+    <SafeAreaView style={styles.screen}>
+      <StatusBar barStyle="dark-content" backgroundColor="#F9F9FF" />
 
-export default function HomeScreen() {
-  return (
-    <ThemedView style={styles.container}>
-      <SafeAreaView style={styles.safeArea}>
-        <ThemedView style={styles.heroSection}>
-          <AnimatedIcon />
-          <ThemedText type="title" style={styles.title}>
-            Welcome to&nbsp;Expo
-          </ThemedText>
-        </ThemedView>
+      <View style={styles.header}>
+        <Text style={styles.brand}>TideFlow</Text>
+        <Pressable onPress={goToLogin} hitSlop={12}>
+          <Text style={styles.skip}>Skip</Text>
+        </Pressable>
+      </View>
 
-        <ThemedText type="code" style={styles.code}>
-          get started
-        </ThemedText>
+      <View style={styles.backgroundOrbTop} />
+      <View style={styles.backgroundOrbLeft} />
+      <View style={styles.backgroundBand} />
 
-        <ThemedView type="backgroundElement" style={styles.stepContainer}>
-          <HintRow
-            title="Try editing"
-            hint={<ThemedText type="code">src/app/index.tsx</ThemedText>}
-          />
-          <HintRow title="Dev tools" hint={getDevMenuHint()} />
-          <HintRow
-            title="Fresh start"
-            hint={<ThemedText type="code">npm run reset-project</ThemedText>}
-          />
-        </ThemedView>
+      <FlatList
+        ref={listRef}
+        data={slides}
+        renderItem={({ item }) => <OnboardingSlide item={item} />}
+        keyExtractor={(item) => item.key}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onMomentumScrollEnd={(event) => {
+          const nextIndex = Math.round(
+            event.nativeEvent.contentOffset.x / width,
+          );
+          setCurrentIndex(nextIndex);
+        }}
+        bounces={false}
+        style={styles.carousel}
+      />
 
-        {Platform.OS === 'web' && <WebBadge />}
-      </SafeAreaView>
-    </ThemedView>
+      <View style={styles.footer}>
+        <View style={styles.dots}>
+          {slides.map((slide, index) => {
+            const active = index === currentIndex;
+            return (
+              <View
+                key={slide.key}
+                style={[styles.dot, active && styles.dotActive]}
+              />
+            );
+          })}
+        </View>
+
+        <Pressable style={styles.primaryButton} onPress={handleNext}>
+          <Text style={styles.primaryButtonText}>
+            {currentIndex === slides.length - 1 ? "Get Started" : "Next"}
+          </Text>
+        </Pressable>
+      </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
+  screen: {
     flex: 1,
-    justifyContent: 'center',
-    flexDirection: 'row',
+    backgroundColor: "#F9F9FF",
   },
-  safeArea: {
+  header: {
+    paddingHorizontal: 20,
+    paddingTop: 10,
+    height: 64,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    zIndex: 3,
+  },
+  brand: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: "#003667",
+    letterSpacing: -0.4,
+  },
+  skip: {
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 1.1,
+    textTransform: "uppercase",
+    color: "#424750",
+  },
+  backgroundOrbTop: {
+    position: "absolute",
+    top: -90,
+    right: -80,
+    width: 240,
+    height: 240,
+    borderRadius: 240,
+    backgroundColor: "rgba(10, 77, 140, 0.12)",
+  },
+  backgroundOrbLeft: {
+    position: "absolute",
+    left: -100,
+    bottom: 140,
+    width: 220,
+    height: 220,
+    borderRadius: 220,
+    backgroundColor: "rgba(123, 58, 0, 0.08)",
+  },
+  backgroundBand: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: "42%",
+    backgroundColor: "rgba(224, 235, 255, 0.68)",
+  },
+  carousel: {
     flex: 1,
-    paddingHorizontal: Spacing.four,
-    alignItems: 'center',
-    gap: Spacing.three,
-    paddingBottom: BottomTabInset + Spacing.three,
-    maxWidth: MaxContentWidth,
   },
-  heroSection: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    flex: 1,
-    paddingHorizontal: Spacing.four,
-    gap: Spacing.four,
+  footer: {
+    paddingHorizontal: 20,
+    paddingBottom: 20,
+    paddingTop: 8,
   },
-  title: {
-    textAlign: 'center',
+  dots: {
+    flexDirection: "row",
+    justifyContent: "center",
+    alignItems: "center",
+    marginBottom: 16,
   },
-  code: {
-    textTransform: 'uppercase',
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 99,
+    backgroundColor: "#C2C6D2",
+    marginHorizontal: 4,
   },
-  stepContainer: {
-    gap: Spacing.three,
-    alignSelf: 'stretch',
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.four,
-    borderRadius: Spacing.four,
+  dotActive: {
+    width: 24,
+    backgroundColor: "#003667",
+  },
+  primaryButton: {
+    minHeight: 56,
+    borderRadius: 18,
+    backgroundColor: "#003667",
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#003667",
+    shadowOpacity: 0.22,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 6,
+  },
+  primaryButtonText: {
+    color: "#FFFFFF",
+    fontSize: 18,
+    fontWeight: "700",
   },
 });
