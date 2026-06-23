@@ -15,7 +15,7 @@ import { MaterialIcons } from "@expo/vector-icons";
 import { router } from "expo-router";
 
 import { COLORS, TYPOGRAPHY } from "@/utils/colors";
-import { useNetworkStatus } from "@/hooks/use-NeteorkStatus";
+import { useNetworkStatus } from "@/hooks/use-Network-Status";
 import { StatusBar as CustomStatusBar } from "@/components/StatusBar";
 import { LoadingOverlay } from "@/components/LoadingOverlay";
 
