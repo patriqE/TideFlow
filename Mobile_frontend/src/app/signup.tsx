@@ -18,7 +18,7 @@ import { router } from "expo-router";
 import { COLORS, TYPOGRAPHY } from "@/utils/colors";
 import { useNetworkStatus } from "@/hooks/use-Network-Status";
 import { StatusBar as CustomStatusBar } from "@/components/StatusBar";
-import { LoadingOverlay } from "@/components/LoadingOverlay";
+import LoadingOverlay from "@/components/LoadingOverlay";
 
 interface SignupFormData {
   fullName: string;
@@ -488,7 +488,7 @@ export default function SignupScreen() {
         </ScrollView>
       </KeyboardAvoidingView>
 
-      <LoadingOverlay visible={isLoading} />
+      <LoadingOverlay visible={isLoading} message="Creating your account..." />
     </SafeAreaView>
   );
 }
