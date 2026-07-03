@@ -19,6 +19,7 @@ import { COLORS, TYPOGRAPHY } from "@/utils/colors";
 import { useNetworkStatus } from "@/hooks/use-Network-Status";
 import { StatusBar as CustomStatusBar } from "@/components/StatusBar";
 import LoadingOverlay from "@/components/LoadingOverlay";
+import { useAuth } from "@/context/auth-context";
 
 interface SignupFormData {
   fullName: string;
@@ -30,6 +31,7 @@ interface SignupFormData {
 }
 
 export default function SignupScreen() {
+  const { register } = useAuth();
   const [formData, setFormData] = useState<SignupFormData>({
     fullName: "",
     email: "",
@@ -77,10 +79,13 @@ export default function SignupScreen() {
     }
 
     setIsLoading(true);
+    try {
+      await register({
+        email: formData.email,
+        phone: formData.phone,
+        password: formData.password,
+      });
 
-    // Simulate API call
-    setTimeout(() => {
-      setIsLoading(false);
       Alert.alert(
         "Account Created!",
         "Your TideFlow account has been created successfully. Please login to continue.",
@@ -91,7 +96,12 @@ export default function SignupScreen() {
           },
         ],
       );
-    }, 2500);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to create account";
+      Alert.alert("Signup Failed", message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const getFieldStyle = (fieldName: string) => {

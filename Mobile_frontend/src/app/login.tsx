@@ -18,6 +18,7 @@ import { COLORS, TYPOGRAPHY } from "@/utils/colors";
 import { useNetworkStatus } from "@/hooks/use-Network-Status";
 import { StatusBar as CustomStatusBar } from "@/components/StatusBar";
 import LoadingOverlay from "@/components/LoadingOverlay";
+import { useAuth } from "@/context/auth-context";
 
 interface LoginFormData {
   identity: string;
@@ -25,6 +26,7 @@ interface LoginFormData {
 }
 
 export default function LoginScreen() {
+  const { login } = useAuth();
   const [formData, setFormData] = useState<LoginFormData>({
     identity: "",
     password: "",
@@ -44,10 +46,8 @@ export default function LoginScreen() {
     }
 
     setIsLoading(true);
-
-    // Simulate API call
-    setTimeout(() => {
-      setIsLoading(false);
+    try {
+      await login(formData.identity, formData.password);
       Alert.alert(
         "Authentication Successful",
         "Redirecting to bridge dashboard...",
@@ -58,7 +58,12 @@ export default function LoginScreen() {
           },
         ],
       );
-    }, 2500);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to sign in";
+      Alert.alert("Login Failed", message);
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
