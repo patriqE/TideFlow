@@ -1,11 +1,11 @@
 import { useEffect } from "react";
 
-import { router, useSegments } from "expo-router";
+import { router, usePathname } from "expo-router";
 
 import { useAuth } from "@/context/auth-context";
 
 export function AuthGate() {
-  const segments = useSegments();
+  const pathname = usePathname();
   const { isHydrated, isAuthenticated } = useAuth();
 
   useEffect(() => {
@@ -13,20 +13,18 @@ export function AuthGate() {
       return;
     }
 
-    const rootSegment = segments[0];
-    const isAuthScreen = rootSegment === "login" || rootSegment === "signup";
-    const isProtectedArea = rootSegment === "(tabs)";
-    const isLandingScreen = rootSegment === "index";
+    const isAuthScreen = pathname === "/login" || pathname === "/signup";
+    const isLandingScreen = pathname === "/";
 
-    if (!isAuthenticated && isProtectedArea) {
+    if (!isAuthenticated && !isAuthScreen) {
       router.replace("/login");
       return;
     }
 
     if (isAuthenticated && (isAuthScreen || isLandingScreen)) {
-      router.replace("/(tabs)/home");
+      router.replace("/");
     }
-  }, [isAuthenticated, isHydrated, segments]);
+  }, [isAuthenticated, isHydrated, pathname]);
 
   return null;
 }
