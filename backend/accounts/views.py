@@ -91,7 +91,7 @@ def login(request):
         except Profile.DoesNotExist:
             user = None
 
-    if user is None or not user.check_password(password):
+    if user is None or not user.is_active or not user.check_password(password):
         return JsonResponse({"detail": "Invalid credentials"}, status=401)
 
     access = create_access_token(user)
@@ -125,7 +125,10 @@ def refresh(request):
 
     jti = payload.get("jti")
     try:
-        sess = Session.objects.get(jti=jti, revoked=False)
+        sess = Session.objects.select_related("user").get(
+            jti=jti, user_id=payload["user_id"], user__is_active=True,
+            revoked=False, expires_at__gt=timezone.now(),
+        )
     except Session.DoesNotExist:
         return JsonResponse({"detail": "Session not found"}, status=401)
 

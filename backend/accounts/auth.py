@@ -1,6 +1,6 @@
 import jwt
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -10,7 +10,7 @@ REFRESH_TOKEN_LIFETIME = timedelta(days=7)
 
 
 def _now():
-    return datetime.utcnow()
+    return datetime.now(timezone.utc)
 
 
 def create_access_token(user):
@@ -49,19 +49,28 @@ def create_refresh_token(user):
 
 def decode_token(token):
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(
+            token, settings.SECRET_KEY, algorithms=["HS256"],
+            options={"require": ["exp", "iat", "user_id", "type"]},
+        )
+        if type(payload["user_id"]) is not int or payload["user_id"] <= 0:
+            return None
+        if payload["type"] not in ("access", "refresh"):
+            return None
+        if payload["type"] == "refresh" and (
+            not isinstance(payload.get("jti"), str) or not payload["jti"].strip()
+        ):
+            return None
         return payload
-    except jwt.ExpiredSignatureError:
-        return None
-    except Exception:
+    except (jwt.InvalidTokenError, TypeError, ValueError):
         return None
 
 
 def get_user_from_payload(payload):
-    if not payload:
+    if not payload or payload.get("type") != "access":
         return None
     User = get_user_model()
     try:
-        return User.objects.get(id=payload.get("user_id"))
+        return User.objects.get(id=payload.get("user_id"), is_active=True)
     except User.DoesNotExist:
         return None

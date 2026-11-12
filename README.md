@@ -70,6 +70,8 @@ Operation notes:
   - `GET /health/` (Django)
   - `GET /api/health` (FastAPI)
 - Account endpoints live under the Django app routes. See `backend/accounts/urls.py` for the exact paths (register, login, refresh, logout, set-role).
+- Protected API requests accept only access tokens for active users. Refresh tokens are used with the refresh/logout endpoints and cannot authenticate API requests. Refresh requires an unrevoked, unexpired session belonging to the token's user. Inactive users cannot log in or refresh.
+- Logout revokes the refresh session. Already issued access tokens remain valid until their 15-minute expiry unless the user is deactivated; immediate per-session access-token revocation is not implemented.
 - Fleet admin endpoints live under `backend/fleet/urls.py` and are mounted at `/fleet/`.
 - Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
 - Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
