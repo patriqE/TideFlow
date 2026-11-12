@@ -12,9 +12,13 @@ services:
     volumes:
       - .:/app
     environment:
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set DJANGO_SECRET_KEY in backend/.env}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-false}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}
       REDIS_URL: redis://redis:6379/0
-      PAYSTACK_SECRET_KEY: sk_test_8ffbd6aacbfe9d594149683e65bf06f1a8250daf
-      APP_BASE_URL: http://localhost:8000
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY:-}
+      PAYSTACK_WEBHOOK_SECRET: ${PAYSTACK_WEBHOOK_SECRET:-${PAYSTACK_SECRET_KEY:-}}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8000}
     depends_on:
       - redis
     command: >

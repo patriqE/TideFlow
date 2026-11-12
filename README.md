@@ -31,24 +31,38 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-1. Prepare the database and apply migrations:
+2. Configure the backend environment (PowerShell):
+
+```powershell
+$env:DJANGO_SECRET_KEY = python -c "import secrets; print(secrets.token_urlsafe(64))"
+$env:DJANGO_DEBUG = "true"
+$env:DJANGO_ALLOWED_HOSTS = "localhost,127.0.0.1,[::1]"
+$env:REDIS_URL = "redis://127.0.0.1:6379/0"
+```
+
+Keep the secret private and reuse it across restarts; changing it invalidates existing JWTs and Django sessions. Django refuses to start without `DJANGO_SECRET_KEY`. Debug is disabled by default. Direct Python commands read process environment variables, not `.env` files. Run a local Redis instance for bookings.
+
+3. Prepare the database and apply migrations:
 
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
-1. Create a superuser (optional):
+4. Create a superuser (optional):
 
 ```bash
 python manage.py createsuperuser
 ```
 
-1. Run the development server:
+5. Run the development server with both Django and the FastAPI gateway:
 
 ```bash
-python manage.py runserver
+uvicorn tideflow_backend.asgi:application --reload
 ```
+
+For Docker Compose, copy `backend/.env.example` to `backend/.env`, fill in a generated `DJANGO_SECRET_KEY`, and run `docker compose up --build` from `backend`. Compose reads that `.env` file automatically. Add a new Paystack test key when testing checkout; leaving it blank disables payment initialization. The Compose configuration is for local development (source mounts and reload enabled), not production hosting.
+
+Before deployment, set `DJANGO_DEBUG=false`, set `DJANGO_ALLOWED_HOSTS` to the actual hostnames, and configure `APP_BASE_URL` with the public HTTPS URL. Supply secrets through the hosting environment. A previously committed Paystack test key must be revoked and replaced in Paystack; removing it from the current files does not remove it from Git history. Do not reuse that key.
 
 Operation notes:
 
