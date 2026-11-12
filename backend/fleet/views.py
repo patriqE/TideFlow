@@ -1,18 +1,28 @@
 import json
+import hashlib
 from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
+from django.db import transaction
 from django.db import IntegrityError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_time
+from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 
 from accounts.models import Profile
 
-from .availability import clear_schedule_availability, get_schedule_available_seats, seed_schedule_availability
-from .models import BoatRoute, BoatSchedule, ScheduleCapacity
+from .availability import (
+    clear_schedule_availability,
+    get_schedule_available_seats,
+    release_schedule_seats,
+    reserve_schedule_seats,
+    seed_schedule_availability,
+)
+from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
+from .payments import create_paystack_session, parse_paystack_event, verify_paystack_transaction
 
 
 def _is_admin_user(user):
@@ -75,6 +85,17 @@ def _parse_date_value(value):
         return None, "date must be in YYYY-MM-DD format"
 
 
+def _parse_integer_value(value, field_name, minimum=1):
+    try:
+        parsed_value = int(value)
+    except (TypeError, ValueError):
+        return None, f"{field_name} must be a whole number"
+
+    if parsed_value < minimum:
+        return None, f"{field_name} must be at least {minimum}"
+    return parsed_value, None
+
+
 def _parse_decimal_value(value, field_name, default=None):
     if value is None:
         return default, None
@@ -111,9 +132,9 @@ def _capacity_payload(capacity):
     }
 
 
-def _schedule_payload(schedule):
+def _schedule_payload(schedule, ride_date=None):
     capacity = getattr(schedule, "capacity", None)
-    available_seats = get_schedule_available_seats(schedule)
+    available_seats = get_schedule_available_seats(schedule, ride_date)
     return {
         "id": schedule.id,
         "route": _route_payload(schedule.route),
@@ -130,8 +151,57 @@ def _schedule_payload(schedule):
     }
 
 
+def _booking_payload(booking):
+    return {
+        "booking_code": str(booking.booking_code),
+        "id": booking.id,
+        "user_id": booking.user_id,
+        "qr_code": _booking_qr_code(booking),
+        "schedule": _schedule_payload(booking.schedule, booking.ride_date),
+        "schedule_id": booking.schedule_id,
+        "ride_date": booking.ride_date.isoformat(),
+        "seat_count": booking.seat_count,
+        "status": booking.status,
+        "payment_provider": booking.payment_provider,
+        "payment_status": booking.payment_status,
+        "payment_reference": booking.payment_reference,
+        "payment_url": booking.payment_url,
+        "payment_currency": booking.payment_currency,
+        "payment_amount": str(booking.payment_amount),
+        "paid_at": booking.paid_at.isoformat() if booking.paid_at else None,
+        "created_at": booking.created_at.isoformat(),
+        "updated_at": booking.updated_at.isoformat(),
+    }
+
+
+def _booking_qr_code(booking):
+    checksum_source = f"{booking.id}:{booking.user_id}"
+    checksum = hashlib.sha256(checksum_source.encode("utf-8")).hexdigest()[:12].upper()
+    return f"TF|B:{booking.id}|P:{booking.user_id}|C:{checksum}"
+
+
+def _confirm_booking_payment(booking, payment_reference=None):
+    if booking.status != Booking.STATUS_CANCELLED:
+        booking.status = Booking.STATUS_CONFIRMED
+        booking.payment_status = "SUCCEEDED"
+        if payment_reference:
+            booking.payment_reference = payment_reference
+        booking.paid_at = timezone.now()
+        booking.save(update_fields=["status", "payment_status", "payment_reference", "paid_at", "updated_at"])
+    return booking
+
+
+def _fail_booking_payment(booking, payment_status):
+    if booking.status != Booking.STATUS_CANCELLED:
+        release_schedule_seats(booking.schedule, booking.ride_date, booking.seat_count)
+        booking.status = Booking.STATUS_CANCELLED
+        booking.payment_status = payment_status
+        booking.save(update_fields=["status", "payment_status", "updated_at"])
+    return booking
+
+
 def _passenger_ride_payload(schedule, ride_date):
-    payload = _schedule_payload(schedule)
+    payload = _schedule_payload(schedule, ride_date)
     payload.update(
         {
             "ride_date": ride_date.isoformat(),
@@ -146,6 +216,29 @@ def _schedule_matches_date(schedule, ride_date):
     weekday_long = ride_date.strftime("%A")
     normalized_days = {str(day).strip().lower() for day in schedule.days_of_week}
     return weekday_short.lower() in normalized_days or weekday_long.lower() in normalized_days
+
+
+def _is_passenger_user(user):
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_superuser", False):
+        return False
+    try:
+        return getattr(user, "profile").role == Profile.ROLE_PASSENGER
+    except Exception:
+        return False
+
+
+def passenger_only(view_func):
+    @wraps(view_func)
+    def wrapper(request, *args, **kwargs):
+        if not getattr(request, "user", None) or not getattr(request.user, "is_authenticated", False):
+            return JsonResponse({"detail": "Authentication required"}, status=401)
+        if not _is_passenger_user(request.user):
+            return JsonResponse({"detail": "Passenger privileges required"}, status=403)
+        return view_func(request, *args, **kwargs)
+
+    return wrapper
 
 
 @csrf_exempt
@@ -355,6 +448,83 @@ def available_rides(request):
 
 
 @csrf_exempt
+@passenger_only
+def booking_collection(request):
+    if request.method == "GET":
+        bookings = Booking.objects.select_related("schedule", "schedule__route").filter(user=request.user).order_by("-created_at")
+        return JsonResponse({"results": [_booking_payload(booking) for booking in bookings]}, status=200)
+
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    data = _read_json(request)
+    if data is None:
+        return JsonResponse({"detail": "Invalid JSON payload"}, status=400)
+
+    schedule_id = data.get("schedule_id")
+    ride_date, date_error = _parse_date_value(data.get("ride_date"))
+    seat_count, seat_count_error = _parse_integer_value(data.get("seat_count", 1), "seat_count")
+
+    if not schedule_id:
+        return JsonResponse({"detail": "Provide schedule_id"}, status=400)
+    if date_error:
+        return JsonResponse({"detail": date_error}, status=400)
+    if seat_count_error:
+        return JsonResponse({"detail": seat_count_error}, status=400)
+
+    schedule = get_object_or_404(BoatSchedule.objects.select_related("route", "capacity"), id=schedule_id, is_active=True, route__is_active=True)
+    if not _schedule_matches_date(schedule, ride_date):
+        return JsonResponse({"detail": "Selected ride does not operate on that date"}, status=400)
+
+    reserved_seats = reserve_schedule_seats(schedule, ride_date, seat_count)
+    if reserved_seats is None:
+        if getattr(schedule, "capacity", None) is None:
+            return JsonResponse({"detail": "Seat availability is unavailable for this ride"}, status=503)
+        return JsonResponse({"detail": "Not enough seats available"}, status=409)
+
+    try:
+        with transaction.atomic():
+            booking = Booking.objects.create(
+                user=request.user,
+                schedule=schedule,
+                ride_date=ride_date,
+                seat_count=seat_count,
+                status=Booking.STATUS_PENDING,
+                payment_provider="paystack",
+                payment_status="PENDING",
+                payment_currency="ngn",
+                payment_amount=schedule.price * seat_count,
+            )
+    except Exception:
+        release_schedule_seats(schedule, ride_date, seat_count)
+        raise
+
+    payload = _booking_payload(booking)
+    payload["available_seats_after_booking"] = reserved_seats
+    return JsonResponse(payload, status=201)
+
+
+@csrf_exempt
+@passenger_only
+def booking_detail(request, booking_code):
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code, user=request.user)
+
+    if request.method == "GET":
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    if request.method == "DELETE":
+        if booking.status == Booking.STATUS_CANCELLED:
+            return JsonResponse(_booking_payload(booking), status=200)
+
+        release_schedule_seats(booking.schedule, booking.ride_date, booking.seat_count)
+        booking.status = Booking.STATUS_CANCELLED
+        booking.save(update_fields=["status", "updated_at"])
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
 @admin_only
 def capacity_collection(request):
     if request.method == "GET":
@@ -430,3 +600,117 @@ def capacity_detail(request, capacity_id):
         return JsonResponse({"detail": "Capacity deleted"}, status=200)
 
     return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+
+@csrf_exempt
+@passenger_only
+def booking_payment(request, booking_code):
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code, user=request.user)
+
+    if request.method == "GET":
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    if booking.status == Booking.STATUS_CANCELLED:
+        return JsonResponse({"detail": "Cancelled bookings cannot be paid for"}, status=409)
+
+    if booking.payment_status == "SUCCEEDED":
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    session, error = create_paystack_session(booking)
+    if error:
+        return JsonResponse({"detail": error}, status=503)
+
+    booking.payment_reference = session.reference
+    booking.payment_url = session.authorization_url
+    booking.payment_status = "INITIATED"
+    booking.payment_provider = "paystack"
+    booking.save(update_fields=["payment_reference", "payment_url", "payment_status", "payment_provider", "updated_at"])
+
+    payload = _booking_payload(booking)
+    payload["authorization_url"] = session.authorization_url
+    payload["access_code"] = session.access_code
+    payload["reference"] = session.reference
+    return JsonResponse(payload, status=200)
+
+
+@csrf_exempt
+def payment_success(request):
+    if request.method != "GET":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    booking_code = request.GET.get("booking_code")
+    reference = request.GET.get("reference") or request.GET.get("trxref")
+    if not booking_code:
+        return JsonResponse({"detail": "Provide booking_code"}, status=400)
+
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
+    if booking.status == Booking.STATUS_CONFIRMED:
+        return JsonResponse(_booking_payload(booking), status=200)
+
+    if not reference and booking.payment_reference:
+        reference = booking.payment_reference
+
+    if not reference:
+        return JsonResponse({"detail": "Provide payment reference"}, status=400)
+
+    verification, error = verify_paystack_transaction(reference)
+    if error:
+        return JsonResponse({"detail": error}, status=400)
+
+    if verification.get("status") != "success":
+        return JsonResponse({"detail": "Payment not successful"}, status=400)
+
+    booking.payment_reference = reference
+    _confirm_booking_payment(booking, payment_reference=reference)
+    return JsonResponse(_booking_payload(booking), status=200)
+
+
+@csrf_exempt
+def payment_cancel(request):
+    if request.method != "GET":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    booking_code = request.GET.get("booking_code")
+    if not booking_code:
+        return JsonResponse({"detail": "Provide booking_code"}, status=400)
+
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
+    if booking.status != Booking.STATUS_CANCELLED:
+        _fail_booking_payment(booking, "ABANDONED")
+    return JsonResponse(_booking_payload(booking), status=200)
+
+
+@csrf_exempt
+def payment_webhook(request):
+    if request.method != "POST":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+
+    signature = request.META.get("HTTP_X_PAYSTACK_SIGNATURE", "")
+    event, error = parse_paystack_event(request.body, signature)
+    if error:
+        return JsonResponse({"detail": error}, status=400)
+
+    event_type = event.get("type") or event.get("event")
+    event_data = event.get("data", {})
+    if isinstance(event_data, dict) and "object" in event_data and isinstance(event_data["object"], dict):
+        event_data = event_data["object"]
+
+    booking_code = event_data.get("metadata", {}).get("booking_code") or event_data.get("reference")
+    if not booking_code:
+        return JsonResponse({"detail": "Missing booking_code metadata"}, status=400)
+
+    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
+
+    if event_type == "charge.success":
+        booking.payment_reference = event_data.get("reference") or booking.payment_reference
+        _confirm_booking_payment(booking, payment_reference=booking.payment_reference)
+        return JsonResponse({"detail": "Payment confirmed"}, status=200)
+
+    if event_type in {"charge.failed", "charge.abandoned"}:
+        _fail_booking_payment(booking, "FAILED" if event_type == "charge.failed" else "ABANDONED")
+        return JsonResponse({"detail": "Payment marked as failed"}, status=200)
+
+    return JsonResponse({"detail": "Unhandled Paystack event"}, status=200)

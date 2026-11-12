@@ -1,4 +1,4 @@
-## About TideFlow
+# About TideFlow
 
 TideFlow is a backend service for coordinating passenger flows and deck operations for small ferry or shuttle services. It provides user accounts, role-based access (Passenger, Deck Agent, Admin), and a lightweight API gateway for future mobile and web clients.
 
@@ -10,6 +10,8 @@ Key capabilities:
 - Admin CRUD for boat routes, schedules, and schedule capacity
 - Passenger rides view for date/time/price lookup under `/fleet/rides/`
 - Redis-backed seat availability for live passenger ride responses
+- Passenger pending bookings under `/fleet/bookings/`
+- Paystack checkout for booking payments and webhook confirmation
 - FastAPI gateway mounted on top of a Django ASGI app for incremental API development
 
 Tech stack:
@@ -29,24 +31,38 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Prepare the database and apply migrations:
+2. Configure the backend environment (PowerShell):
+
+```powershell
+$env:DJANGO_SECRET_KEY = python -c "import secrets; print(secrets.token_urlsafe(64))"
+$env:DJANGO_DEBUG = "true"
+$env:DJANGO_ALLOWED_HOSTS = "localhost,127.0.0.1,[::1]"
+$env:REDIS_URL = "redis://127.0.0.1:6379/0"
+```
+
+Keep the secret private and reuse it across restarts; changing it invalidates existing JWTs and Django sessions. Django refuses to start without `DJANGO_SECRET_KEY`. Debug is disabled by default. Direct Python commands read process environment variables, not `.env` files. Run a local Redis instance for bookings.
+
+3. Prepare the database and apply migrations:
 
 ```bash
-python manage.py makemigrations
 python manage.py migrate
 ```
 
-3. Create a superuser (optional):
+4. Create a superuser (optional):
 
 ```bash
 python manage.py createsuperuser
 ```
 
-4. Run the development server:
+5. Run the development server with both Django and the FastAPI gateway:
 
 ```bash
-python manage.py runserver
+uvicorn tideflow_backend.asgi:application --reload
 ```
+
+For Docker Compose, copy `backend/.env.example` to `backend/.env`, fill in a generated `DJANGO_SECRET_KEY`, and run `docker compose up --build` from `backend`. Compose reads that `.env` file automatically. Add a new Paystack test key when testing checkout; leaving it blank disables payment initialization. The Compose configuration is for local development (source mounts and reload enabled), not production hosting.
+
+Before deployment, set `DJANGO_DEBUG=false`, set `DJANGO_ALLOWED_HOSTS` to the actual hostnames, and configure `APP_BASE_URL` with the public HTTPS URL. Supply secrets through the hosting environment. A previously committed Paystack test key must be revoked and replaced in Paystack; removing it from the current files does not remove it from Git history. Do not reuse that key.
 
 Operation notes:
 
@@ -57,6 +73,10 @@ Operation notes:
 - Fleet admin endpoints live under `backend/fleet/urls.py` and are mounted at `/fleet/`.
 - Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
 - Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
+- Create a pending booking with `POST /fleet/bookings/` using `schedule_id`, `ride_date`, and optional `seat_count`.
+- Initialize payment with `POST /fleet/bookings/<booking_code>/payment/`.
+- Handle Paystack webhooks at `POST /fleet/payments/webhook/`.
+- Set `PAYSTACK_SECRET_KEY` and `APP_BASE_URL` in the environment; webhook verification uses the same secret if `PAYSTACK_WEBHOOK_SECRET` is not set.
 - Apply migrations before exercising `Profile.role` and `Session` features.
 
 If you want to see how TideFlow was built (design decisions and staged work), see `DEVELOPMENT.md`.

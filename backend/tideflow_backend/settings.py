@@ -1,11 +1,20 @@
 from pathlib import Path
+import os
+
+from django.core.exceptions import ImproperlyConfigured
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = "django-insecure-change-me-for-local-development"
-DEBUG = True
-ALLOWED_HOSTS = ["*"]
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "").strip()
+if not SECRET_KEY:
+    raise ImproperlyConfigured("Set DJANGO_SECRET_KEY to a unique, private value before starting Django.")
+DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() in {"true", "1", "yes"}
+ALLOWED_HOSTS = [
+    host.strip()
+    for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1,[::1]").split(",")
+    if host.strip()
+]
 
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -66,4 +75,7 @@ USE_TZ = True
 STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-REDIS_URL = "redis://redis:6379/0"
+REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
+PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_WEBHOOK_SECRET = os.environ.get("PAYSTACK_WEBHOOK_SECRET", PAYSTACK_SECRET_KEY)
+APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
