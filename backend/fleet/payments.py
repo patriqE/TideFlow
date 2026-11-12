@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import hmac
 import json
@@ -44,6 +43,25 @@ def _amount_to_kobo(amount):
     return int((amount or 0) * 100)
 
 
+def payment_matches_booking(booking, data, require_success=True):
+    """Bind provider evidence to the checkout recorded for this booking."""
+    if not isinstance(data, dict) or booking.payment_provider != "paystack":
+        return False
+    metadata = data.get("metadata")
+    currency = data.get("currency")
+    return (
+        (not require_success or data.get("status") == "success")
+        and bool(booking.payment_reference)
+        and data.get("reference") == booking.payment_reference
+        and type(data.get("amount")) is int
+        and data["amount"] == _amount_to_kobo(booking.payment_amount)
+        and isinstance(currency, str)
+        and currency.upper() == booking.payment_currency.upper()
+        and isinstance(metadata, dict)
+        and metadata.get("booking_code") == str(booking.booking_code)
+    )
+
+
 def create_paystack_session(booking):
     secret_key = get_paystack_secret_key()
     if not secret_key:
@@ -53,6 +71,7 @@ def create_paystack_session(booking):
     payload = {
         "email": getattr(booking.user, "email", None) or "passenger@tideflow.local",
         "amount": _amount_to_kobo(booking.payment_amount),
+        "currency": booking.payment_currency.upper(),
         "callback_url": success_url,
         "metadata": {
             "booking_code": str(booking.booking_code),
@@ -136,4 +155,6 @@ def parse_paystack_event(payload, signature):
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None, "Invalid Paystack webhook payload"
 
+    if not isinstance(event, dict):
+        return None, "Invalid Paystack webhook payload"
     return event, None

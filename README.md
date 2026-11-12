@@ -78,6 +78,7 @@ Operation notes:
 - Create a pending booking with `POST /fleet/bookings/` using `schedule_id`, `ride_date`, and optional `seat_count`.
 - Initialize payment with `POST /fleet/bookings/<booking_code>/payment/`.
 - Handle Paystack webhooks at `POST /fleet/payments/webhook/`.
+- Payment confirmation requires a successful transaction whose reference matches the initialized checkout, whose amount (in minor units) and currency match the booking, and whose metadata contains that booking's code. Both callback verification and signed success webhooks enforce these checks. Repeated confirmations preserve the original payment timestamp; cancelled bookings cannot be confirmed. Initialize checkout before testing confirmation.
 - Set `PAYSTACK_SECRET_KEY` and `APP_BASE_URL` in the environment; webhook verification uses the same secret if `PAYSTACK_WEBHOOK_SECRET` is not set.
 - Apply migrations before exercising `Profile.role` and `Session` features.
 
