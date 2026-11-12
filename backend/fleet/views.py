@@ -1,5 +1,6 @@
 import json
 import hashlib
+from uuid import UUID
 from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -22,7 +23,7 @@ from .availability import (
     seed_schedule_availability,
 )
 from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
-from .payments import create_paystack_session, parse_paystack_event, verify_paystack_transaction
+from .payments import create_paystack_session, parse_paystack_event, verify_paystack_transaction, payment_matches_booking
 
 
 def _is_admin_user(user):
@@ -180,14 +181,16 @@ def _booking_qr_code(booking):
     return f"TF|B:{booking.id}|P:{booking.user_id}|C:{checksum}"
 
 
-def _confirm_booking_payment(booking, payment_reference=None):
-    if booking.status != Booking.STATUS_CANCELLED:
-        booking.status = Booking.STATUS_CONFIRMED
-        booking.payment_status = "SUCCEEDED"
-        if payment_reference:
-            booking.payment_reference = payment_reference
-        booking.paid_at = timezone.now()
-        booking.save(update_fields=["status", "payment_status", "payment_reference", "paid_at", "updated_at"])
+def _confirm_booking_payment(booking):
+    # A conditional write makes repeated confirmations harmless and prevents
+    # stale verification from confirming a cancelled or changed checkout.
+    now = timezone.now()
+    Booking.objects.filter(
+        pk=booking.pk, status=Booking.STATUS_PENDING,
+        payment_provider="paystack", payment_reference=booking.payment_reference,
+        payment_amount=booking.payment_amount, payment_currency=booking.payment_currency,
+    ).update(status=Booking.STATUS_CONFIRMED, payment_status="SUCCEEDED", paid_at=now, updated_at=now)
+    booking.refresh_from_db()
     return booking
 
 
@@ -646,25 +649,29 @@ def payment_success(request):
     if not booking_code:
         return JsonResponse({"detail": "Provide booking_code"}, status=400)
 
+    try:
+        booking_code = UUID(booking_code)
+    except (ValueError, TypeError, AttributeError):
+        return JsonResponse({"detail": "Invalid booking_code"}, status=400)
     booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
-    if booking.status == Booking.STATUS_CONFIRMED:
+    reference = reference or booking.payment_reference
+    if not booking.payment_reference or reference != booking.payment_reference:
+        return JsonResponse({"detail": "Payment reference does not match booking"}, status=400)
+    if booking.status == Booking.STATUS_CANCELLED:
+        return JsonResponse({"detail": "Cancelled bookings cannot be confirmed"}, status=409)
+    if booking.status == Booking.STATUS_CONFIRMED and booking.payment_status == "SUCCEEDED":
         return JsonResponse(_booking_payload(booking), status=200)
-
-    if not reference and booking.payment_reference:
-        reference = booking.payment_reference
-
-    if not reference:
-        return JsonResponse({"detail": "Provide payment reference"}, status=400)
 
     verification, error = verify_paystack_transaction(reference)
     if error:
         return JsonResponse({"detail": error}, status=400)
 
-    if verification.get("status") != "success":
-        return JsonResponse({"detail": "Payment not successful"}, status=400)
+    if not payment_matches_booking(booking, verification):
+        return JsonResponse({"detail": "Payment verification does not match booking"}, status=400)
 
-    booking.payment_reference = reference
-    _confirm_booking_payment(booking, payment_reference=reference)
+    _confirm_booking_payment(booking)
+    if booking.status != Booking.STATUS_CONFIRMED:
+        return JsonResponse({"detail": "Booking changed during payment verification"}, status=409)
     return JsonResponse(_booking_payload(booking), status=200)
 
 
@@ -694,19 +701,26 @@ def payment_webhook(request):
         return JsonResponse({"detail": error}, status=400)
 
     event_type = event.get("type") or event.get("event")
+    if event_type not in ("charge.success", "charge.failed", "charge.abandoned"):
+        return JsonResponse({"detail": "Unhandled Paystack event"}, status=200)
     event_data = event.get("data", {})
     if isinstance(event_data, dict) and "object" in event_data and isinstance(event_data["object"], dict):
         event_data = event_data["object"]
 
-    booking_code = event_data.get("metadata", {}).get("booking_code") or event_data.get("reference")
-    if not booking_code:
-        return JsonResponse({"detail": "Missing booking_code metadata"}, status=400)
+    if not isinstance(event_data, dict) or not isinstance(event_data.get("reference"), str) or not event_data["reference"]:
+        return JsonResponse({"detail": "Missing payment reference"}, status=400)
 
-    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
+    booking = get_object_or_404(
+        Booking.objects.select_related("schedule", "schedule__route"),
+        payment_reference=event_data["reference"],
+    )
+    if not payment_matches_booking(booking, event_data, require_success=event_type == "charge.success"):
+        return JsonResponse({"detail": "Payment event does not match booking"}, status=400)
 
     if event_type == "charge.success":
-        booking.payment_reference = event_data.get("reference") or booking.payment_reference
-        _confirm_booking_payment(booking, payment_reference=booking.payment_reference)
+        _confirm_booking_payment(booking)
+        if booking.status != Booking.STATUS_CONFIRMED:
+            return JsonResponse({"detail": "Booking cannot be confirmed"}, status=409)
         return JsonResponse({"detail": "Payment confirmed"}, status=200)
 
     if event_type in {"charge.failed", "charge.abandoned"}:

@@ -339,21 +339,16 @@ class FleetCrudTests(TestCase):
             **passenger_headers,
         )
         booking_code = booking_response.json()["booking_code"]
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference=booking_code)
         mock_parse_webhook_event.return_value = (
             {
                 "event": "charge.success",
                 "data": {
-                    "object": {
-                        "reference": booking_code,
-                        "metadata": {"booking_code": booking_code},
-                    }
-                },
-                "type": "charge.success",
-                "data": {
-                    "object": {
-                        "reference": booking_code,
-                        "metadata": {"booking_code": booking_code},
-                    }
+                    "status": "success",
+                    "reference": booking_code,
+                    "amount": 2400,
+                    "currency": "NGN",
+                    "metadata": {"booking_code": booking_code},
                 },
             },
             None,
@@ -406,6 +401,7 @@ class FleetCrudTests(TestCase):
             **passenger_headers,
         )
         booking_code = booking_response.json()["booking_code"]
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference=booking_code)
         mock_parse_webhook_event.return_value = (
             {
                 "event": "charge.abandoned",
@@ -413,6 +409,8 @@ class FleetCrudTests(TestCase):
                 "data": {
                     "object": {
                         "reference": booking_code,
+                        "amount": 3600,
+                        "currency": "NGN",
                         "metadata": {"booking_code": booking_code},
                     }
                 },
@@ -468,8 +466,10 @@ class FleetCrudTests(TestCase):
         )
         booking_code = booking_response.json()["booking_code"]
 
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference="ref_test_456")
         mock_verify_paystack_transaction.return_value = (
-            {"status": "success", "reference": "ref_test_456"},
+            {"status": "success", "reference": "ref_test_456", "amount": 3000,
+             "currency": "NGN", "metadata": {"booking_code": booking_code}},
             None,
         )
 
