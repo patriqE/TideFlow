@@ -77,6 +77,8 @@ Operation notes:
 - Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
 - Create a pending booking with `POST /fleet/bookings/` using `schedule_id`, `ride_date`, and optional `seat_count`.
 - Initialize payment with `POST /fleet/bookings/<booking_code>/payment/`.
+- Cancel an unpaid booking with `DELETE /fleet/bookings/<booking_code>/` using its owner's Bearer access token. Cookie-only authentication is not accepted for cancellation. Paid or confirmed bookings return `409` until a refund workflow is implemented. Repeated cancellation does not release seats again.
+- `GET /payment/cancel/` is an informational checkout-return page: it does not cancel bookings or disclose booking details. Failure webhooks cannot cancel bookings already recorded as paid or confirmed. Redis reconciliation after outages and late payments after cancellation are addressed in subsequent steps.
 - Handle Paystack webhooks at `POST /fleet/payments/webhook/`.
 - Payment confirmation requires a successful transaction whose reference matches the initialized checkout, whose amount (in minor units) and currency match the booking, and whose metadata contains that booking's code. Both callback verification and signed success webhooks enforce these checks. Repeated confirmations preserve the original payment timestamp; cancelled bookings cannot be confirmed. Initialize checkout before testing confirmation.
 - Set `PAYSTACK_SECRET_KEY` and `APP_BASE_URL` in the environment; webhook verification uses the same secret if `PAYSTACK_WEBHOOK_SECRET` is not set.

@@ -195,11 +195,17 @@ def _confirm_booking_payment(booking):
 
 
 def _fail_booking_payment(booking, payment_status):
-    if booking.status != Booking.STATUS_CANCELLED:
+    # Only the request that transitions an unpaid booking releases its seats.
+    # Check the current database state so stale failure events cannot undo payment.
+    changed = Booking.objects.filter(
+        pk=booking.pk, status=Booking.STATUS_PENDING, paid_at__isnull=True,
+        payment_reference=booking.payment_reference,
+    ).exclude(payment_status="SUCCEEDED").update(
+        status=Booking.STATUS_CANCELLED, payment_status=payment_status, updated_at=timezone.now(),
+    )
+    if changed:
         release_schedule_seats(booking.schedule, booking.ride_date, booking.seat_count)
-        booking.status = Booking.STATUS_CANCELLED
-        booking.payment_status = payment_status
-        booking.save(update_fields=["status", "payment_status", "updated_at"])
+    booking.refresh_from_db()
     return booking
 
 
@@ -516,12 +522,17 @@ def booking_detail(request, booking_code):
         return JsonResponse(_booking_payload(booking), status=200)
 
     if request.method == "DELETE":
+        # This CSRF-exempt API must not authorize cancellation through cookies alone.
+        if not request.META.get("HTTP_AUTHORIZATION", "").lower().startswith("bearer "):
+            return JsonResponse({"detail": "Bearer authentication required"}, status=401)
+        if booking.status == Booking.STATUS_CONFIRMED or booking.payment_status == "SUCCEEDED" or booking.paid_at:
+            return JsonResponse({"detail": "Paid bookings require a refund process and cannot be cancelled here"}, status=409)
         if booking.status == Booking.STATUS_CANCELLED:
             return JsonResponse(_booking_payload(booking), status=200)
 
-        release_schedule_seats(booking.schedule, booking.ride_date, booking.seat_count)
-        booking.status = Booking.STATUS_CANCELLED
-        booking.save(update_fields=["status", "updated_at"])
+        _fail_booking_payment(booking, "CANCELLED")
+        if booking.status != Booking.STATUS_CANCELLED:
+            return JsonResponse({"detail": "Booking changed and cannot be cancelled"}, status=409)
         return JsonResponse(_booking_payload(booking), status=200)
 
     return JsonResponse({"detail": "Method not allowed"}, status=405)
@@ -680,14 +691,8 @@ def payment_cancel(request):
     if request.method != "GET":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
 
-    booking_code = request.GET.get("booking_code")
-    if not booking_code:
-        return JsonResponse({"detail": "Provide booking_code"}, status=400)
-
-    booking = get_object_or_404(Booking.objects.select_related("schedule", "schedule__route"), booking_code=booking_code)
-    if booking.status != Booking.STATUS_CANCELLED:
-        _fail_booking_payment(booking, "ABANDONED")
-    return JsonResponse(_booking_payload(booking), status=200)
+    # A checkout redirect is not authorization to cancel or evidence of failure.
+    return JsonResponse({"detail": "Checkout closed. This page does not change your booking. Return to the app to check its status or cancel an unpaid booking."}, status=200)
 
 
 @csrf_exempt
@@ -725,6 +730,6 @@ def payment_webhook(request):
 
     if event_type in {"charge.failed", "charge.abandoned"}:
         _fail_booking_payment(booking, "FAILED" if event_type == "charge.failed" else "ABANDONED")
-        return JsonResponse({"detail": "Payment marked as failed"}, status=200)
+        return JsonResponse({"detail": "Payment failure event processed"}, status=200)
 
     return JsonResponse({"detail": "Unhandled Paystack event"}, status=200)
