@@ -19,7 +19,7 @@ class FakeRedisClient:
     def ping(self):
         return True
 
-    def set(self, key, value):
+    def set(self, key, value, **kwargs):
         self.storage[key] = str(value)
         return True
 
@@ -179,7 +179,8 @@ class FleetCrudTests(TestCase):
         )
         ScheduleCapacity.objects.create(schedule=schedule, max_passengers=42, max_cargo_kg=500)
 
-        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(len(body["results"]), 1)
@@ -339,21 +340,16 @@ class FleetCrudTests(TestCase):
             **passenger_headers,
         )
         booking_code = booking_response.json()["booking_code"]
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference=booking_code)
         mock_parse_webhook_event.return_value = (
             {
                 "event": "charge.success",
                 "data": {
-                    "object": {
-                        "reference": booking_code,
-                        "metadata": {"booking_code": booking_code},
-                    }
-                },
-                "type": "charge.success",
-                "data": {
-                    "object": {
-                        "reference": booking_code,
-                        "metadata": {"booking_code": booking_code},
-                    }
+                    "status": "success",
+                    "reference": booking_code,
+                    "amount": 2400,
+                    "currency": "NGN",
+                    "metadata": {"booking_code": booking_code},
                 },
             },
             None,
@@ -406,6 +402,7 @@ class FleetCrudTests(TestCase):
             **passenger_headers,
         )
         booking_code = booking_response.json()["booking_code"]
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference=booking_code)
         mock_parse_webhook_event.return_value = (
             {
                 "event": "charge.abandoned",
@@ -413,6 +410,8 @@ class FleetCrudTests(TestCase):
                 "data": {
                     "object": {
                         "reference": booking_code,
+                        "amount": 3600,
+                        "currency": "NGN",
                         "metadata": {"booking_code": booking_code},
                     }
                 },
@@ -468,8 +467,10 @@ class FleetCrudTests(TestCase):
         )
         booking_code = booking_response.json()["booking_code"]
 
+        Booking.objects.filter(booking_code=booking_code).update(payment_reference="ref_test_456")
         mock_verify_paystack_transaction.return_value = (
-            {"status": "success", "reference": "ref_test_456"},
+            {"status": "success", "reference": "ref_test_456", "amount": 3000,
+             "currency": "NGN", "metadata": {"booking_code": booking_code}},
             None,
         )
 
