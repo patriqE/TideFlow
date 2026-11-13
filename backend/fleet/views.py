@@ -5,7 +5,8 @@ from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models import F
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_time
@@ -21,6 +22,7 @@ from .availability import (
     seed_schedule_availability,
 )
 from .bookings import CapacityUnavailable, NotEnoughSeats, ReservationBusy, create_pending_booking
+from .expiry import expire_booking
 from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
 from .payments import create_paystack_session, parse_paystack_event, verify_paystack_transaction, payment_matches_booking
 
@@ -152,6 +154,7 @@ def _schedule_payload(schedule, ride_date=None):
 
 
 def _booking_payload(booking):
+    expire_booking(booking)
     return {
         "booking_code": str(booking.booking_code),
         "id": booking.id,
@@ -169,6 +172,7 @@ def _booking_payload(booking):
         "payment_currency": booking.payment_currency,
         "payment_amount": str(booking.payment_amount),
         "paid_at": booking.paid_at.isoformat() if booking.paid_at else None,
+        "expires_at": booking.expires_at.isoformat(),
         "created_at": booking.created_at.isoformat(),
         "updated_at": booking.updated_at.isoformat(),
     }
@@ -181,15 +185,26 @@ def _booking_qr_code(booking):
 
 
 def _confirm_booking_payment(booking):
-    # A conditional write makes repeated confirmations harmless and prevents
-    # stale verification from confirming a cancelled or changed checkout.
-    now = timezone.now()
-    Booking.objects.filter(
-        pk=booking.pk, status=Booking.STATUS_PENDING,
+    matched_checkout = dict(
+        pk=booking.pk,
         payment_provider="paystack", payment_reference=booking.payment_reference,
         payment_amount=booking.payment_amount, payment_currency=booking.payment_currency,
-    ).update(status=Booking.STATUS_CONFIRMED, payment_status="SUCCEEDED", paid_at=now, updated_at=now)
-    booking.refresh_from_db()
+    )
+    with transaction.atomic():
+        # Share the reservation lock: a payment cannot claim an expired hold
+        # while another connection is reallocating its seats.
+        ScheduleCapacity.objects.filter(schedule_id=booking.schedule_id).update(max_passengers=F("max_passengers"))
+        expire_booking(booking)
+        now = timezone.now()
+        Booking.objects.filter(
+            **matched_checkout, status=Booking.STATUS_PENDING, expires_at__gt=now,
+        ).update(status=Booking.STATUS_CONFIRMED, payment_status="SUCCEEDED", paid_at=now, updated_at=now)
+        # Close a hold that crossed its deadline between the expiry check and write.
+        expire_booking(booking)
+        Booking.objects.filter(
+            **matched_checkout, status=Booking.STATUS_CANCELLED, paid_at__isnull=True,
+        ).update(payment_status="REFUND_REQUIRED", paid_at=now, updated_at=now)
+        booking.refresh_from_db()
     return booking
 
 
@@ -510,6 +525,7 @@ def booking_detail(request, booking_code):
         # This CSRF-exempt API must not authorize cancellation through cookies alone.
         if not request.META.get("HTTP_AUTHORIZATION", "").lower().startswith("bearer "):
             return JsonResponse({"detail": "Bearer authentication required"}, status=401)
+        expire_booking(booking)
         if booking.status == Booking.STATUS_CONFIRMED or booking.payment_status == "SUCCEEDED" or booking.paid_at:
             return JsonResponse({"detail": "Paid bookings require a refund process and cannot be cancelled here"}, status=409)
         if booking.status == Booking.STATUS_CANCELLED:
@@ -612,8 +628,9 @@ def booking_payment(request, booking_code):
     if request.method != "POST":
         return JsonResponse({"detail": "Method not allowed"}, status=405)
 
+    expire_booking(booking)
     if booking.status == Booking.STATUS_CANCELLED:
-        return JsonResponse({"detail": "Cancelled bookings cannot be paid for"}, status=409)
+        return JsonResponse({"detail": "Cancelled or expired bookings cannot be paid for"}, status=409)
 
     if booking.payment_status == "SUCCEEDED":
         return JsonResponse(_booking_payload(booking), status=200)
@@ -622,11 +639,16 @@ def booking_payment(request, booking_code):
     if error:
         return JsonResponse({"detail": error}, status=503)
 
-    booking.payment_reference = session.reference
-    booking.payment_url = session.authorization_url
-    booking.payment_status = "INITIATED"
-    booking.payment_provider = "paystack"
-    booking.save(update_fields=["payment_reference", "payment_url", "payment_status", "payment_provider", "updated_at"])
+    changed = Booking.objects.filter(
+        pk=booking.pk, status=Booking.STATUS_PENDING, payment_reference=booking.payment_reference,
+        paid_at__isnull=True,
+    ).exclude(payment_status="SUCCEEDED").update(
+        payment_reference=session.reference, payment_url=session.authorization_url,
+        payment_status="INITIATED", payment_provider="paystack", updated_at=timezone.now(),
+    )
+    expire_booking(booking)
+    if not changed or booking.status != Booking.STATUS_PENDING:
+        return JsonResponse({"detail": "Booking expired or changed during checkout initialization"}, status=409)
 
     payload = _booking_payload(booking)
     payload["authorization_url"] = session.authorization_url
@@ -653,8 +675,6 @@ def payment_success(request):
     reference = reference or booking.payment_reference
     if not booking.payment_reference or reference != booking.payment_reference:
         return JsonResponse({"detail": "Payment reference does not match booking"}, status=400)
-    if booking.status == Booking.STATUS_CANCELLED:
-        return JsonResponse({"detail": "Cancelled bookings cannot be confirmed"}, status=409)
     if booking.status == Booking.STATUS_CONFIRMED and booking.payment_status == "SUCCEEDED":
         return JsonResponse(_booking_payload(booking), status=200)
 
@@ -667,6 +687,8 @@ def payment_success(request):
 
     _confirm_booking_payment(booking)
     if booking.status != Booking.STATUS_CONFIRMED:
+        if booking.payment_status == "REFUND_REQUIRED":
+            return JsonResponse({"detail": "Payment received after reservation closed; refund review required"}, status=409)
         return JsonResponse({"detail": "Booking changed during payment verification"}, status=409)
     return JsonResponse(_booking_payload(booking), status=200)
 
@@ -710,6 +732,8 @@ def payment_webhook(request):
     if event_type == "charge.success":
         _confirm_booking_payment(booking)
         if booking.status != Booking.STATUS_CONFIRMED:
+            if booking.payment_status == "REFUND_REQUIRED":
+                return JsonResponse({"detail": "Payment recorded for refund review; booking remains cancelled"}, status=200)
             return JsonResponse({"detail": "Booking cannot be confirmed"}, status=409)
         return JsonResponse({"detail": "Payment confirmed"}, status=200)
 

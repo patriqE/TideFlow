@@ -3,7 +3,8 @@ import logging
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Sum
+from django.db.models import Q, Sum
+from django.utils import timezone
 
 from .models import Booking, ScheduleCapacity
 
@@ -37,7 +38,11 @@ def schedule_key(schedule_id, ride_date=None):
 def reserved_seat_count(schedule_id, ride_date):
     return Booking.objects.filter(
         schedule_id=schedule_id, ride_date=ride_date,
-        status__in=[Booking.STATUS_PENDING, Booking.STATUS_CONFIRMED],
+    ).filter(
+        Q(status=Booking.STATUS_CONFIRMED)
+        | (Q(status=Booking.STATUS_PENDING) & (
+            Q(expires_at__gt=timezone.now()) | Q(paid_at__isnull=False) | Q(payment_status="SUCCEEDED")
+        ))
     ).aggregate(total=Sum("seat_count"))["total"] or 0
 
 

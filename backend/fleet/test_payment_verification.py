@@ -162,10 +162,11 @@ class PaymentVerificationTests(TestCase):
     def test_cancelled_booking_cannot_be_reconfirmed(self):
         Booking.objects.filter(pk=self.booking.pk).update(status=Booking.STATUS_CANCELLED)
         self.assertEqual(self.callback(self.evidence()).status_code, 409)
-        self.assertEqual(self.webhook({"event": "charge.success", "data": self.evidence()}).status_code, 409)
+        self.assertEqual(self.webhook({"event": "charge.success", "data": self.evidence()}).status_code, 200)
         self.booking.refresh_from_db()
         self.assertEqual(self.booking.status, Booking.STATUS_CANCELLED)
-        self.assertIsNone(self.booking.paid_at)
+        self.assertEqual(self.booking.payment_status, "REFUND_REQUIRED")
+        self.assertIsNotNone(self.booking.paid_at)
 
     def test_cancellation_during_provider_verification_is_not_overwritten(self):
         def verify(reference):
