@@ -5,7 +5,6 @@ from functools import wraps
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 
-from django.db import transaction
 from django.db import IntegrityError
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
@@ -19,9 +18,9 @@ from .availability import (
     clear_schedule_availability,
     get_schedule_available_seats,
     release_schedule_seats,
-    reserve_schedule_seats,
     seed_schedule_availability,
 )
+from .bookings import CapacityUnavailable, NotEnoughSeats, ReservationBusy, create_pending_booking
 from .models import BoatRoute, BoatSchedule, Booking, ScheduleCapacity
 from .payments import create_paystack_session, parse_paystack_event, verify_paystack_transaction, payment_matches_booking
 
@@ -485,28 +484,14 @@ def booking_collection(request):
     if not _schedule_matches_date(schedule, ride_date):
         return JsonResponse({"detail": "Selected ride does not operate on that date"}, status=400)
 
-    reserved_seats = reserve_schedule_seats(schedule, ride_date, seat_count)
-    if reserved_seats is None:
-        if getattr(schedule, "capacity", None) is None:
-            return JsonResponse({"detail": "Seat availability is unavailable for this ride"}, status=503)
-        return JsonResponse({"detail": "Not enough seats available"}, status=409)
-
     try:
-        with transaction.atomic():
-            booking = Booking.objects.create(
-                user=request.user,
-                schedule=schedule,
-                ride_date=ride_date,
-                seat_count=seat_count,
-                status=Booking.STATUS_PENDING,
-                payment_provider="paystack",
-                payment_status="PENDING",
-                payment_currency="ngn",
-                payment_amount=schedule.price * seat_count,
-            )
-    except Exception:
-        release_schedule_seats(schedule, ride_date, seat_count)
-        raise
+        booking, reserved_seats = create_pending_booking(request.user, schedule, ride_date, seat_count)
+    except CapacityUnavailable:
+        return JsonResponse({"detail": "Seat availability is unavailable for this ride"}, status=503)
+    except NotEnoughSeats:
+        return JsonResponse({"detail": "Not enough seats available"}, status=409)
+    except ReservationBusy:
+        return JsonResponse({"detail": "Booking service is busy; please retry"}, status=503)
 
     payload = _booking_payload(booking)
     payload["available_seats_after_booking"] = reserved_seats

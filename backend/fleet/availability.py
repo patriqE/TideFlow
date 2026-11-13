@@ -1,124 +1,95 @@
-import os
+"""Database-derived availability with an optional, best-effort Redis mirror."""
+import logging
 
 from django.conf import settings
+from django.db import transaction
+from django.db.models import Sum
+
+from .models import Booking, ScheduleCapacity
 
 try:
     import redis
-except Exception:  # pragma: no cover - dependency is optional for local tests
+except ImportError:  # Redis is optional; reservations never depend on it.
     redis = None
 
-
+logger = logging.getLogger(__name__)
 REDIS_KEY_PREFIX = "tideflow:seat-availability:schedule:"
 
 
 def get_redis_client():
-    redis_url = getattr(settings, "REDIS_URL", None) or os.environ.get("REDIS_URL")
+    redis_url = getattr(settings, "REDIS_URL", None)
     if not redis_url or redis is None:
         return None
-
     try:
-        client = redis.Redis.from_url(redis_url, decode_responses=True)
-        client.ping()
-        return client
-    except Exception:
+        return redis.Redis.from_url(
+            redis_url, decode_responses=True, socket_connect_timeout=0.2,
+            socket_timeout=0.2,
+        )
+    except (ValueError, redis.RedisError):
         return None
 
 
 def schedule_key(schedule_id, ride_date=None):
-    if ride_date is None:
-        return f"{REDIS_KEY_PREFIX}{schedule_id}"
-    return f"{REDIS_KEY_PREFIX}{schedule_id}:{ride_date.isoformat()}"
+    suffix = "" if ride_date is None else f":{ride_date.isoformat()}"
+    return f"{REDIS_KEY_PREFIX}{schedule_id}{suffix}"
 
 
-def seed_schedule_availability(schedule, ride_date=None):
-    capacity = getattr(schedule, "capacity", None)
-    if not capacity:
+def reserved_seat_count(schedule_id, ride_date):
+    return Booking.objects.filter(
+        schedule_id=schedule_id, ride_date=ride_date,
+        status__in=[Booking.STATUS_PENDING, Booking.STATUS_CONFIRMED],
+    ).aggregate(total=Sum("seat_count"))["total"] or 0
+
+
+def _database_availability(schedule_id, ride_date):
+    maximum = ScheduleCapacity.objects.filter(schedule_id=schedule_id).values_list("max_passengers", flat=True).first()
+    if maximum is None:
         return None
+    reserved = reserved_seat_count(schedule_id, ride_date) if ride_date is not None else 0
+    return max(0, maximum - reserved)
 
-    client = get_redis_client()
-    if client is None:
-        return int(capacity.max_passengers)
 
-    client.set(schedule_key(schedule.id, ride_date), int(capacity.max_passengers))
-    return int(capacity.max_passengers)
+def _mirror_availability(schedule_id, ride_date):
+    # Recompute after commit; never publish an uncommitted reservation or release.
+    available = _database_availability(schedule_id, ride_date)
+    try:
+        client = get_redis_client()
+        if client is not None:
+            if available is None:
+                client.delete(schedule_key(schedule_id, ride_date))
+            else:
+                client.set(schedule_key(schedule_id, ride_date), available, ex=300)
+    except Exception:
+        # An optional cache outage must not turn a committed booking into an error.
+        logger.warning("Unable to update seat availability cache for schedule %s", schedule_id)
+
+
+def refresh_schedule_availability(schedule, ride_date=None):
+    transaction.on_commit(lambda: _mirror_availability(schedule.id, ride_date), robust=True)
 
 
 def get_schedule_available_seats(schedule, ride_date=None):
-    capacity = getattr(schedule, "capacity", None)
-    if not capacity:
-        return None
-
-    client = get_redis_client()
-    if client is None:
-        return int(capacity.max_passengers)
-
-    current_value = client.get(schedule_key(schedule.id, ride_date))
-    if current_value is None:
-        current_value = int(capacity.max_passengers)
-        client.set(schedule_key(schedule.id, ride_date), current_value)
-
-    try:
-        return int(current_value)
-    except (TypeError, ValueError):
-        client.set(schedule_key(schedule.id, ride_date), int(capacity.max_passengers))
-        return int(capacity.max_passengers)
+    available = _database_availability(schedule.id, ride_date)
+    refresh_schedule_availability(schedule, ride_date)
+    return available
 
 
-def reserve_schedule_seats(schedule, ride_date, seat_count):
-    capacity = getattr(schedule, "capacity", None)
-    if not capacity:
-        return None
-
-    client = get_redis_client()
-    if client is None:
-        return None
-
-    key = schedule_key(schedule.id, ride_date)
-    current_value = client.get(key)
-    if current_value is None:
-        current_value = seed_schedule_availability(schedule, ride_date)
-
-    try:
-        available_seats = int(current_value)
-    except (TypeError, ValueError):
-        available_seats = int(capacity.max_passengers)
-
-    if seat_count > available_seats:
-        return None
-
-    updated_value = available_seats - seat_count
-    client.set(key, updated_value)
-    return updated_value
+def seed_schedule_availability(schedule, ride_date=None):
+    return get_schedule_available_seats(schedule, ride_date)
 
 
 def release_schedule_seats(schedule, ride_date, seat_count):
-    capacity = getattr(schedule, "capacity", None)
-    if not capacity:
-        return None
-
-    client = get_redis_client()
-    if client is None:
-        return None
-
-    key = schedule_key(schedule.id, ride_date)
-    current_value = client.get(key)
-    if current_value is None:
-        current_value = int(capacity.max_passengers)
-
-    try:
-        available_seats = int(current_value)
-    except (TypeError, ValueError):
-        available_seats = int(capacity.max_passengers)
-
-    updated_value = min(int(capacity.max_passengers), available_seats + seat_count)
-    client.set(key, updated_value)
-    return updated_value
+    # The cancellation in the database releases seats. Never increment a cache
+    # counter: repeated events and recovery after Redis loss must be harmless.
+    refresh_schedule_availability(schedule, ride_date)
 
 
 def clear_schedule_availability(schedule_id, ride_date=None):
-    client = get_redis_client()
-    if client is None:
-        return False
-
-    client.delete(schedule_key(schedule_id, ride_date))
-    return True
+    def clear():
+        try:
+            client = get_redis_client()
+            if client is not None:
+                client.delete(schedule_key(schedule_id, ride_date))
+        except Exception:
+            logger.warning("Unable to clear seat availability cache for schedule %s", schedule_id)
+    transaction.on_commit(clear, robust=True)

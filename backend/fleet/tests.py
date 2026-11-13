@@ -19,7 +19,7 @@ class FakeRedisClient:
     def ping(self):
         return True
 
-    def set(self, key, value):
+    def set(self, key, value, **kwargs):
         self.storage[key] = str(value)
         return True
 
@@ -179,7 +179,8 @@ class FleetCrudTests(TestCase):
         )
         ScheduleCapacity.objects.create(schedule=schedule, max_passengers=42, max_cargo_kg=500)
 
-        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(len(body["results"]), 1)

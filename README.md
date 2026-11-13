@@ -9,7 +9,7 @@ Key capabilities:
 - Role management: `PASSENGER`, `DECK_AGENT`, `ADMIN`
 - Admin CRUD for boat routes, schedules, and schedule capacity
 - Passenger rides view for date/time/price lookup under `/fleet/rides/`
-- Redis-backed seat availability for live passenger ride responses
+- Database-backed seat reservations with an optional Redis availability mirror
 - Passenger pending bookings under `/fleet/bookings/`
 - Paystack checkout for booking payments and webhook confirmation
 - FastAPI gateway mounted on top of a Django ASGI app for incremental API development
@@ -40,7 +40,7 @@ $env:DJANGO_ALLOWED_HOSTS = "localhost,127.0.0.1,[::1]"
 $env:REDIS_URL = "redis://127.0.0.1:6379/0"
 ```
 
-Keep the secret private and reuse it across restarts; changing it invalidates existing JWTs and Django sessions. Django refuses to start without `DJANGO_SECRET_KEY`. Debug is disabled by default. Direct Python commands read process environment variables, not `.env` files. Run a local Redis instance for bookings.
+Keep the secret private and reuse it across restarts; changing it invalidates existing JWTs and Django sessions. Django refuses to start without `DJANGO_SECRET_KEY`. Debug is disabled by default. Direct Python commands read process environment variables, not `.env` files. Redis is optional: bookings and availability work from the database during Redis outages. Set `REDIS_URL` to an empty string to disable the mirror locally.
 
 3. Prepare the database and apply migrations:
 
@@ -74,11 +74,13 @@ Operation notes:
 - Logout revokes the refresh session. Already issued access tokens remain valid until their 15-minute expiry unless the user is deactivated; immediate per-session access-token revocation is not implemented.
 - Fleet admin endpoints live under `backend/fleet/urls.py` and are mounted at `/fleet/`.
 - Passenger ride lookup uses `GET /fleet/rides/?date=YYYY-MM-DD&time=HH:MM:SS`.
-- Seat availability is stored in Redis under `tideflow:seat-availability:schedule:<id>` and seeded from schedule capacity.
+- Seat availability is capacity minus pending and confirmed booking seats for the specific schedule and ride date. Cancellation releases capacity through the booking's database state. Reservation checks and booking creation share a database transaction, serialized by a write lock on schedule capacity. SQLite lock contention is retried briefly and returns `503` if still busy; insufficient seats return `409`.
+- Redis is a best-effort mirror under `tideflow:seat-availability:schedule:<id>:<YYYY-MM-DD>`, refreshed after commits and availability reads with a five-minute TTL. API reads and reservation decisions always use the database, so missing, corrupt, or stale Redis data cannot reopen sold seats. Redis recovery repairs each requested date on its next read; it is not a background rebuild of every key.
+- Apply migrations after updating: migration `0006_booking_seat_lookup_index` adds an index for schedule/date/status availability queries. Pending bookings continue to hold seats until cancelled; automatic expiry is Step 6.
 - Create a pending booking with `POST /fleet/bookings/` using `schedule_id`, `ride_date`, and optional `seat_count`.
 - Initialize payment with `POST /fleet/bookings/<booking_code>/payment/`.
 - Cancel an unpaid booking with `DELETE /fleet/bookings/<booking_code>/` using its owner's Bearer access token. Cookie-only authentication is not accepted for cancellation. Paid or confirmed bookings return `409` until a refund workflow is implemented. Repeated cancellation does not release seats again.
-- `GET /payment/cancel/` is an informational checkout-return page: it does not cancel bookings or disclose booking details. Failure webhooks cannot cancel bookings already recorded as paid or confirmed. Redis reconciliation after outages and late payments after cancellation are addressed in subsequent steps.
+- `GET /payment/cancel/` is an informational checkout-return page: it does not cancel bookings or disclose booking details. Failure webhooks cannot cancel bookings already recorded as paid or confirmed. Late payments after cancellation are addressed in subsequent steps.
 - Handle Paystack webhooks at `POST /fleet/payments/webhook/`.
 - Payment confirmation requires a successful transaction whose reference matches the initialized checkout, whose amount (in minor units) and currency match the booking, and whose metadata contains that booking's code. Both callback verification and signed success webhooks enforce these checks. Repeated confirmations preserve the original payment timestamp; cancelled bookings cannot be confirmed. Initialize checkout before testing confirmation.
 - Set `PAYSTACK_SECRET_KEY` and `APP_BASE_URL` in the environment; webhook verification uses the same secret if `PAYSTACK_WEBHOOK_SECRET` is not set.
