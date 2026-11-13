@@ -72,3 +72,6 @@ class Booking(models.Model):
 
     def __str__(self) -> str:
         return f"Booking {self.booking_code} ({self.status})"
+
+    class Meta:
+        indexes = [models.Index(fields=["schedule", "ride_date", "status"], name="booking_seat_lookup_idx")]
