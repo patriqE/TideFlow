@@ -8,6 +8,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
+from django.db.models import F
 
 from .models import Profile
 from .auth import create_access_token, create_refresh_token, decode_token
@@ -19,10 +20,36 @@ def _read_json(request):
     data = json.loads(request.body.decode())
     if not isinstance(data, dict):
         raise ValueError("Expected an object")
-    for field in ("email", "phone", "password", "refresh", "role"):
+    for field in ("email", "phone", "password", "refresh", "role", "full_name"):
         if field in data and not isinstance(data[field], str):
             raise ValueError(f"{field} must be text")
     return data
+
+
+def _profile_payload(user, profile=None):
+    return {
+        "id": user.pk,
+        "full_name": profile.full_name if profile else user.get_full_name(),
+        "email": user.email,
+        "phone": profile.phone if profile else None,
+        "role": Profile.ROLE_ADMIN if user.is_superuser else (profile.role if profile else Profile.ROLE_PASSENGER),
+    }
+
+
+def _validate_contact(email, phone):
+    if not email and not phone:
+        raise ValidationError("Keep at least one email or phone for login")
+    if email:
+        validate_email(email)
+    if len(email or phone) > get_user_model()._meta.get_field("username").max_length:
+        raise ValidationError("Identifier is too long")
+    if phone and not re.fullmatch(r"\+?[0-9]{7,15}", phone):
+        raise ValidationError("Phone must contain 7 to 15 digits with an optional leading +")
+
+
+def _validate_name(name):
+    if len(name) > 255 or any(ord(char) < 32 for char in name):
+        raise ValidationError("Full name must be at most 255 characters without control characters")
 
 
 
@@ -47,6 +74,7 @@ def register(request):
     email = (data.get("email") or "").strip().lower() or None
     phone = (data.get("phone") or "").strip() or None
     password = data.get("password")
+    full_name = data.get("full_name", "").strip()
 
     if not password or (not email and not phone):
         return JsonResponse({"detail": "Provide password and at least email or phone"}, status=400)
@@ -55,12 +83,8 @@ def register(request):
     username = email if email else phone
 
     try:
-        if email:
-            validate_email(email)
-        if len(username) > User._meta.get_field("username").max_length:
-            raise ValidationError("Identifier is too long")
-        if phone and not re.fullmatch(r"\+?[0-9]{7,15}", phone):
-            raise ValidationError("Phone must contain 7 to 15 digits with an optional leading +")
+        _validate_contact(email, phone)
+        _validate_name(full_name)
         validate_password(password, User(username=username, email=email or ""))
     except ValidationError as error:
         return JsonResponse({"detail": "; ".join(error.messages)}, status=400)
@@ -76,11 +100,63 @@ def register(request):
     try:
         with transaction.atomic():
             user = User.objects.create_user(username=username, email=email or "", password=password)
-            Profile.objects.create(user=user, phone=phone)
+            profile = Profile.objects.create(user=user, phone=phone, full_name=full_name)
     except IntegrityError:
         return JsonResponse({"detail": "Email or phone already in use"}, status=400)
 
-    return JsonResponse({"id": user.id, "email": user.email, "phone": phone}, status=201)
+    return JsonResponse(_profile_payload(user, profile), status=201)
+
+
+@csrf_exempt
+def profile_detail(request):
+    # Accept only Bearer authentication on this CSRF-exempt endpoint.
+    if not request.META.get("HTTP_AUTHORIZATION", "").lower().startswith("bearer ") or not request.user.is_authenticated:
+        return JsonResponse({"detail": "Bearer authentication required"}, status=401)
+    if request.method == "GET":
+        profile = Profile.objects.filter(user=request.user).first()
+        return JsonResponse(_profile_payload(request.user, profile))
+    if request.method != "PATCH":
+        return JsonResponse({"detail": "Method not allowed"}, status=405)
+    try:
+        data = _read_json(request)
+    except (ValueError, UnicodeDecodeError):
+        return JsonResponse({"detail": "Invalid JSON payload"}, status=400)
+    if not data or set(data) - {"full_name", "email", "phone"}:
+        return JsonResponse({"detail": "Provide only full_name, email, or phone"}, status=400)
+
+    User = get_user_model()
+    try:
+        with transaction.atomic():
+            # Serialize edits to this account, including on SQLite.
+            User.objects.filter(pk=request.user.pk).update(username=F("username"))
+            user = User.objects.get(pk=request.user.pk, is_active=True)
+            profile, _ = Profile.objects.get_or_create(user=user, defaults={
+                "full_name": user.get_full_name()[:255],
+                "role": Profile.ROLE_ADMIN if user.is_superuser else Profile.ROLE_PASSENGER,
+            })
+            name = data.get("full_name", profile.full_name).strip()
+            email = data["email"].strip().lower() if "email" in data else user.email
+            phone = (data["phone"].strip() or None) if "phone" in data else profile.phone
+            _validate_name(name)
+            if "email" in data or "phone" in data:
+                _validate_contact(email, phone)
+                if email and User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
+                    raise ValidationError("Email already in use")
+                if phone and Profile.objects.filter(phone=phone).exclude(user=user).exists():
+                    raise ValidationError("Phone already in use")
+                user.username = email or phone
+                user.email = email
+                user.save(update_fields=["username", "email"])
+            profile.full_name = name
+            profile.phone = phone
+            profile.save(update_fields=["full_name", "phone"])
+    except User.DoesNotExist:
+        return JsonResponse({"detail": "Account unavailable"}, status=401)
+    except ValidationError as error:
+        return JsonResponse({"detail": "; ".join(error.messages)}, status=400)
+    except IntegrityError:
+        return JsonResponse({"detail": "Email or phone already in use"}, status=400)
+    return JsonResponse(_profile_payload(user, profile))
 
 
 @csrf_exempt
