@@ -1,5 +1,6 @@
 """Create a booking and reserve its seats in one database transaction."""
 import time
+from decimal import Decimal
 
 from django.db import OperationalError, connection, transaction
 from django.db.models import F
@@ -23,6 +24,9 @@ class ReservationBusy(Exception):
 def create_pending_booking(user, schedule, ride_date, seat_count):
     if type(seat_count) is not int or seat_count < 1:
         raise ValueError("seat_count must be a positive integer")
+    amount = schedule.price * seat_count
+    if not amount.is_finite() or amount < 0 or amount > Decimal("99999999.99"):
+        raise ValueError("Booking total exceeds the supported payment amount")
     for attempt in range(5):
         try:
             with transaction.atomic():

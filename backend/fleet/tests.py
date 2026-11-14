@@ -156,10 +156,10 @@ class FleetCrudTests(TestCase):
             days_of_week=["mon"],
         )
 
-        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11", "time": "09:00:00"})
+        response = self.client.get(reverse("fleet_available_rides"), data={"date": "2099-01-01", "time": "09:00:00"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["date"], "2026-06-11")
+        self.assertEqual(body["date"], "2099-01-01")
         self.assertEqual(len(body["results"]), 1)
         self.assertEqual(body["results"][0]["departure_time"], "10:30:00")
         self.assertEqual(body["results"][0]["price"], "18.00")
@@ -180,12 +180,12 @@ class FleetCrudTests(TestCase):
         ScheduleCapacity.objects.create(schedule=schedule, max_passengers=42, max_cargo_kg=500)
 
         with self.captureOnCommitCallbacks(execute=True):
-            response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+            response = self.client.get(reverse("fleet_available_rides"), data={"date": "2099-01-01"})
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(len(body["results"]), 1)
         self.assertEqual(body["results"][0]["available_seats"], 42)
-        self.assertEqual(fake_client.get(f"tideflow:seat-availability:schedule:{schedule.id}:2026-06-11"), "42")
+        self.assertEqual(fake_client.get(f"tideflow:seat-availability:schedule:{schedule.id}:2099-01-01"), "42")
 
     @patch("fleet.availability.get_redis_client")
     def test_passenger_can_create_pending_booking_and_release_seats_on_cancel(self, mock_get_redis_client):
@@ -212,7 +212,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 3},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 3},
             content_type="application/json",
             **passenger_headers,
         )
@@ -232,7 +232,7 @@ class FleetCrudTests(TestCase):
         self.assertEqual(cancel_response.status_code, 200)
         self.assertEqual(cancel_response.json()["status"], Booking.STATUS_CANCELLED)
 
-        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2099-01-01"})
         self.assertEqual(rides_response.status_code, 200)
         self.assertEqual(rides_response.json()["results"][0]["available_seats"], 10)
 
@@ -261,7 +261,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 3},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 3},
             content_type="application/json",
             **passenger_headers,
         )
@@ -294,7 +294,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 2},
             content_type="application/json",
             **passenger_headers,
         )
@@ -335,7 +335,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 2},
             content_type="application/json",
             **passenger_headers,
         )
@@ -367,7 +367,7 @@ class FleetCrudTests(TestCase):
         self.assertEqual(booking.status, Booking.STATUS_CONFIRMED)
         self.assertEqual(booking.payment_status, "SUCCEEDED")
 
-        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2099-01-01"})
         self.assertEqual(rides_response.status_code, 200)
         self.assertEqual(rides_response.json()["results"][0]["available_seats"], 4)
 
@@ -397,7 +397,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 2},
             content_type="application/json",
             **passenger_headers,
         )
@@ -431,7 +431,7 @@ class FleetCrudTests(TestCase):
         self.assertEqual(booking.status, Booking.STATUS_CANCELLED)
         self.assertEqual(booking.payment_status, "ABANDONED")
 
-        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2026-06-11"})
+        rides_response = self.client.get(reverse("fleet_available_rides"), data={"date": "2099-01-01"})
         self.assertEqual(rides_response.status_code, 200)
         self.assertEqual(rides_response.json()["results"][0]["available_seats"], 4)
 
@@ -461,7 +461,7 @@ class FleetCrudTests(TestCase):
 
         booking_response = self.client.post(
             reverse("fleet_booking_collection"),
-            data={"schedule_id": schedule.id, "ride_date": "2026-06-11", "seat_count": 2},
+            data={"schedule_id": schedule.id, "ride_date": "2099-01-01", "seat_count": 2},
             content_type="application/json",
             **passenger_headers,
         )
