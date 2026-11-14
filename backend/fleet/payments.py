@@ -67,11 +67,15 @@ def create_paystack_session(booking):
     if not secret_key:
         return None, "Paystack is not configured"
 
+    if not booking.payment_reference:
+        return None, "Payment reference must be recorded before initialization"
+
     success_url, cancel_url = build_callback_urls(booking)
     payload = {
         "email": getattr(booking.user, "email", None) or "passenger@tideflow.local",
         "amount": _amount_to_kobo(booking.payment_amount),
         "currency": booking.payment_currency.upper(),
+        "reference": booking.payment_reference,
         "callback_url": success_url,
         "metadata": {
             "booking_code": str(booking.booking_code),
@@ -100,10 +104,21 @@ def create_paystack_session(booking):
     except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
         return None, "Unable to initialize Paystack payment"
 
+    if not isinstance(body, dict):
+        return None, "Invalid Paystack initialization response"
     if not body.get("status"):
         return None, body.get("message") or "Paystack payment failed to initialize"
 
     response_data = body.get("data") or {}
+    if (
+        not isinstance(response_data, dict)
+        or response_data.get("reference") != booking.payment_reference
+        or not isinstance(response_data.get("authorization_url"), str)
+        or not response_data["authorization_url"].startswith("https://")
+        or not isinstance(response_data.get("access_code"), str)
+        or not response_data["access_code"]
+    ):
+        return None, "Invalid Paystack initialization response"
     return PaystackSession(
         authorization_url=response_data.get("authorization_url", ""),
         access_code=response_data.get("access_code", ""),
@@ -131,6 +146,8 @@ def verify_paystack_transaction(reference):
     except (HTTPError, URLError, TimeoutError, ValueError, json.JSONDecodeError):
         return None, "Unable to verify Paystack payment"
 
+    if not isinstance(body, dict) or not isinstance(body.get("data"), dict):
+        return None, "Invalid Paystack verification response"
     if not body.get("status"):
         return None, body.get("message") or "Paystack payment verification failed"
 

@@ -70,6 +70,8 @@ class Booking(models.Model):
     payment_status = models.CharField(max_length=20, default="PENDING")
     payment_reference = models.CharField(max_length=255, unique=True, null=True, blank=True)
     payment_url = models.URLField(blank=True)
+    payment_access_code = models.CharField(max_length=255, blank=True)
+    checkout_started_at = models.DateTimeField(null=True, blank=True)
     payment_currency = models.CharField(max_length=10, default="ngn")
     payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     paid_at = models.DateTimeField(null=True, blank=True)

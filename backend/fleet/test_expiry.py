@@ -110,14 +110,14 @@ class ReservationExpiryTests(TestCase):
     def test_hold_expiring_during_initialization_does_not_return_checkout_url(self):
         def initialize(booking):
             self.pass_deadline()
-            return SimpleNamespace(reference="new-reference", authorization_url="https://paystack.test/checkout", access_code="code"), None
+            return SimpleNamespace(reference=booking.payment_reference, authorization_url="https://paystack.test/checkout", access_code="code"), None
 
         with patch("fleet.views.create_paystack_session", side_effect=initialize):
             response = self.client.post(f"/fleet/bookings/{self.booking.booking_code}/payment/", **self.headers)
         self.assertEqual(response.status_code, 409)
         self.assertNotIn("authorization_url", response.json())
         self.booking.refresh_from_db()
-        self.assertEqual(self.booking.payment_reference, "new-reference")
+        self.assertEqual(self.booking.payment_reference, "expiry-reference")
         self.assertEqual(self.booking.payment_status, "EXPIRED")
 
     def test_late_payment_cannot_reclaim_reallocated_seat(self):

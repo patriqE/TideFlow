@@ -2,11 +2,11 @@ import json
 import hashlib
 from uuid import UUID
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_time
@@ -635,15 +635,52 @@ def booking_payment(request, booking_code):
     if booking.payment_status == "SUCCEEDED":
         return JsonResponse(_booking_payload(booking), status=200)
 
+    if booking.payment_url and booking.payment_reference:
+        payload = _booking_payload(booking)
+        if booking.status != Booking.STATUS_PENDING:
+            return JsonResponse({"detail": "Booking is no longer awaiting payment"}, status=409)
+        payload.update(authorization_url=booking.payment_url, access_code=booking.payment_access_code,
+                       reference=booking.payment_reference)
+        return JsonResponse(payload, status=200)
+
+    # Persist a single provider reference before making any network request.
+    # A short lease prevents concurrent initialization without holding DB locks
+    # during network I/O. Crash recovery retries the same unique reference.
+    now = timezone.now()
+    reference = booking.payment_reference or f"tf-{booking.booking_code.hex}"
+    claimed = Booking.objects.filter(
+        pk=booking.pk, status=Booking.STATUS_PENDING, expires_at__gt=now,
+        paid_at__isnull=True, payment_reference=booking.payment_reference, payment_url="",
+    ).exclude(payment_status="SUCCEEDED").filter(
+        Q(checkout_started_at__isnull=True) | Q(checkout_started_at__lte=now - timedelta(seconds=60)),
+    ).update(payment_reference=reference, checkout_started_at=now, updated_at=now)
+    if not claimed:
+        response = JsonResponse({"detail": "Checkout is initializing or booking changed; retry shortly"}, status=409)
+        response["Retry-After"] = "2"
+        return response
+    booking.refresh_from_db()
     session, error = create_paystack_session(booking)
     if error:
-        return JsonResponse({"detail": error}, status=503)
+        Booking.objects.filter(pk=booking.pk, checkout_started_at=now).update(checkout_started_at=None)
+        # An initialization timeout may have occurred after Paystack accepted it.
+        # Keep the reference so callbacks/webhooks can still reconcile payment.
+        verification, verification_error = verify_paystack_transaction(reference)
+        if not verification_error and payment_matches_booking(booking, verification):
+            _confirm_booking_payment(booking)
+            if booking.status == Booking.STATUS_CONFIRMED:
+                return JsonResponse(_booking_payload(booking), status=200)
+            return JsonResponse({"detail": "Payment recorded for refund review; booking remains cancelled"}, status=409)
+        return JsonResponse({"detail": error, "reference": reference}, status=503)
+
+    if session.reference != reference:
+        Booking.objects.filter(pk=booking.pk, checkout_started_at=now).update(checkout_started_at=None)
+        return JsonResponse({"detail": "Provider returned a different payment reference"}, status=503)
 
     changed = Booking.objects.filter(
-        pk=booking.pk, status=Booking.STATUS_PENDING, payment_reference=booking.payment_reference,
-        paid_at__isnull=True,
+        pk=booking.pk, status=Booking.STATUS_PENDING, payment_reference=reference,
+        paid_at__isnull=True, checkout_started_at=now,
     ).exclude(payment_status="SUCCEEDED").update(
-        payment_reference=session.reference, payment_url=session.authorization_url,
+        payment_url=session.authorization_url, payment_access_code=session.access_code, checkout_started_at=None,
         payment_status="INITIATED", payment_provider="paystack", updated_at=timezone.now(),
     )
     expire_booking(booking)
@@ -651,6 +688,8 @@ def booking_payment(request, booking_code):
         return JsonResponse({"detail": "Booking expired or changed during checkout initialization"}, status=409)
 
     payload = _booking_payload(booking)
+    if booking.status != Booking.STATUS_PENDING:
+        return JsonResponse({"detail": "Booking is no longer awaiting payment"}, status=409)
     payload["authorization_url"] = session.authorization_url
     payload["access_code"] = session.access_code
     payload["reference"] = session.reference
