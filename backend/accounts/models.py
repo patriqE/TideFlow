@@ -5,6 +5,7 @@ from django.conf import settings
 class Profile(models.Model):
     user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
     phone = models.CharField(max_length=20, unique=True, null=True, blank=True)
+    full_name = models.CharField(max_length=255, blank=True)
     ROLE_PASSENGER = "PASSENGER"
     ROLE_DECK_AGENT = "DECK_AGENT"
     ROLE_ADMIN = "ADMIN"
