@@ -1,12 +1,13 @@
 import json
 import hashlib
+import re
 from uuid import UUID
 from functools import wraps
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from django.db import IntegrityError, transaction
-from django.db.models import F, Q
+from django.db.models import F, Q, Sum
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_time
@@ -54,25 +55,55 @@ def _read_json(request):
     if not request.body:
         return {}
     try:
-        return json.loads(request.body.decode())
+        data = json.loads(request.body.decode())
+        if not isinstance(data, dict):
+            return None
+        for field in ("name", "origin", "destination", "description", "notes"):
+            if field in data:
+                limit = 120 if field in ("name", "origin", "destination") else 10000
+                if not isinstance(data[field], str) or len(data[field]) > limit:
+                    return None
+        if "is_active" in data and type(data["is_active"]) is not bool:
+            return None
+        if "price" in data and _parse_decimal_value(data["price"], "price")[1]:
+            return None
+        for field in ("route_id", "schedule_id", "seat_count", "max_passengers", "max_cargo_kg"):
+            if field in data:
+                value, error = _parse_integer_value(data[field], field, minimum=0 if field == "max_cargo_kg" else 1)
+                if error:
+                    return None
+                data[field] = value
+        return data
     except Exception:
         return None
 
 
 def _parse_days_of_week(value):
-    if value is None:
-        return []
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
     if isinstance(value, str):
-        return [item.strip() for item in value.split(",") if item.strip()]
-    return None
+        value = value.split(",")
+    if not isinstance(value, list) or not value:
+        return None
+    names = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+    aliases = {alias: name[:3] for name in names for alias in (name, name[:3])}
+    days = []
+    for item in value:
+        if not isinstance(item, str) or item.strip().lower() not in aliases:
+            return None
+        day = aliases[item.strip().lower()]
+        if day not in days:
+            days.append(day)
+    return days
 
 
 def _parse_time_value(value, field_name):
     if value is None:
         return None, f"Provide {field_name}"
-    parsed_value = parse_time(value) if isinstance(value, str) else value
+    try:
+        parsed_value = parse_time(value) if isinstance(value, str) and re.fullmatch(r"\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?", value) else None
+    except ValueError:
+        parsed_value = None
+    if parsed_value is not None and parsed_value.tzinfo is not None:
+        parsed_value = None
     if parsed_value is None:
         return None, f"{field_name} must be a valid time"
     return parsed_value, None
@@ -82,27 +113,37 @@ def _parse_date_value(value):
     if not value:
         return None, "Provide date"
     try:
-        return datetime.strptime(value, "%Y-%m-%d").date(), None
-    except ValueError:
+        parsed = datetime.strptime(value, "%Y-%m-%d").date()
+        if parsed.isoformat() != value:
+            raise ValueError
+        return parsed, None
+    except (ValueError, TypeError):
         return None, "date must be in YYYY-MM-DD format"
 
 
 def _parse_integer_value(value, field_name, minimum=1):
+    if type(value) is not int and not (isinstance(value, str) and re.fullmatch(r"[0-9]{1,10}", value)):
+        return None, f"{field_name} must be a whole number"
     try:
         parsed_value = int(value)
     except (TypeError, ValueError):
         return None, f"{field_name} must be a whole number"
 
+    if parsed_value > 2147483647:
+        return None, f"{field_name} is too large"
     if parsed_value < minimum:
         return None, f"{field_name} must be at least {minimum}"
     return parsed_value, None
 
 
 def _parse_decimal_value(value, field_name, default=None):
-    if value is None:
+    if value is None and default is not None:
         return default, None
     try:
-        return Decimal(str(value)), None
+        parsed = Decimal(str(value))
+        if not parsed.is_finite() or parsed < 0 or parsed > Decimal("99999999.99") or parsed.as_tuple().exponent < -2:
+            raise ValueError
+        return parsed, None
     except (InvalidOperation, ValueError, TypeError):
         return None, f"{field_name} must be a valid number"
 
@@ -496,6 +537,9 @@ def booking_collection(request):
         return JsonResponse({"detail": seat_count_error}, status=400)
 
     schedule = get_object_or_404(BoatSchedule.objects.select_related("route", "capacity"), id=schedule_id, is_active=True, route__is_active=True)
+    departure = timezone.make_aware(datetime.combine(ride_date, schedule.departure_time), timezone.get_current_timezone())
+    if departure <= timezone.now():
+        return JsonResponse({"detail": "Cannot book a ride that has already departed"}, status=400)
     if not _schedule_matches_date(schedule, ride_date):
         return JsonResponse({"detail": "Selected ride does not operate on that date"}, status=400)
 
@@ -507,6 +551,8 @@ def booking_collection(request):
         return JsonResponse({"detail": "Not enough seats available"}, status=409)
     except ReservationBusy:
         return JsonResponse({"detail": "Booking service is busy; please retry"}, status=503)
+    except ValueError as error:
+        return JsonResponse({"detail": str(error)}, status=400)
 
     payload = _booking_payload(booking)
     payload["available_seats_after_booking"] = reserved_seats
@@ -593,6 +639,8 @@ def capacity_detail(request, capacity_id):
             return JsonResponse({"detail": "Invalid JSON payload"}, status=400)
 
         if "schedule_id" in data:
+            if data["schedule_id"] != capacity.schedule_id:
+                return JsonResponse({"detail": "Capacity cannot be moved to a different schedule"}, status=400)
             capacity.schedule = get_object_or_404(BoatSchedule, id=data.get("schedule_id"))
         if "max_passengers" in data:
             capacity.max_passengers = data.get("max_passengers")
@@ -602,7 +650,17 @@ def capacity_detail(request, capacity_id):
             capacity.notes = (data.get("notes") or "").strip()
 
         try:
-            capacity.save()
+            with transaction.atomic():
+                # Serialize capacity reductions with seat reservations.
+                ScheduleCapacity.objects.filter(pk=capacity.pk).update(max_passengers=F("max_passengers"))
+                occupied = Booking.objects.filter(schedule_id=capacity.schedule_id, ride_date__gte=timezone.localdate()).filter(
+                    Q(status=Booking.STATUS_CONFIRMED) | (Q(status=Booking.STATUS_PENDING) & (
+                        Q(expires_at__gt=timezone.now()) | Q(paid_at__isnull=False) | Q(payment_status="SUCCEEDED")
+                    ))
+                ).values("ride_date").annotate(total=Sum("seat_count")).order_by("-total").first()
+                if occupied and capacity.max_passengers < occupied["total"]:
+                    return JsonResponse({"detail": "Capacity cannot be below reserved seats"}, status=409)
+                capacity.save(update_fields=[key for key in ("max_passengers", "max_cargo_kg", "notes") if key in data] + ["updated_at"])
         except IntegrityError:
             return JsonResponse({"detail": "That schedule already has capacity configured"}, status=400)
 

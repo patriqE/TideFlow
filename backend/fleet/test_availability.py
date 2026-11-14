@@ -25,7 +25,7 @@ def make_fixture():
         days_of_week=["thu"], price=Decimal("12.50"),
     )
     ScheduleCapacity.objects.create(schedule=schedule, max_passengers=3)
-    return user, schedule, date(2026, 12, 3)
+    return user, schedule, date(2099, 1, 1)
 
 
 class AvailabilityTests(TestCase):
