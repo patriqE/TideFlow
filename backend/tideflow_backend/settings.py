@@ -79,3 +79,9 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379/0")
 PAYSTACK_SECRET_KEY = os.environ.get("PAYSTACK_SECRET_KEY", "")
 PAYSTACK_WEBHOOK_SECRET = os.environ.get("PAYSTACK_WEBHOOK_SECRET", PAYSTACK_SECRET_KEY)
 APP_BASE_URL = os.environ.get("APP_BASE_URL", "http://localhost:8000")
+try:
+    BOOKING_HOLD_MINUTES = int(os.environ.get("BOOKING_HOLD_MINUTES", "15"))
+    if BOOKING_HOLD_MINUTES <= 0:
+        raise ValueError
+except ValueError:
+    raise ImproperlyConfigured("BOOKING_HOLD_MINUTES must be a positive integer.")

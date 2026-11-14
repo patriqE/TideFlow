@@ -41,6 +41,16 @@ class EnvironmentSettingsTests(SimpleTestCase):
     def test_false_string_does_not_enable_debug(self):
         self.assertFalse(self.load_settings(DJANGO_DEBUG="false")["DEBUG"])
 
+    def test_booking_hold_window_defaults_and_override(self):
+        self.assertEqual(self.load_settings()["BOOKING_HOLD_MINUTES"], 15)
+        self.assertEqual(self.load_settings(BOOKING_HOLD_MINUTES="7")["BOOKING_HOLD_MINUTES"], 7)
+
+    def test_invalid_booking_hold_window_fails_startup(self):
+        for value in ("0", "-1", "abc", "1.5", ""):
+            with self.subTest(value=value):
+                with self.assertRaisesMessage(ImproperlyConfigured, "BOOKING_HOLD_MINUTES"):
+                    self.load_settings(BOOKING_HOLD_MINUTES=value)
+
     def test_webhook_secret_defaults_to_payment_secret(self):
         settings = self.load_settings(PAYSTACK_SECRET_KEY="test-only-payment-key")
         self.assertEqual(settings["PAYSTACK_WEBHOOK_SECRET"], "test-only-payment-key")

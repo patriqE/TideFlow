@@ -39,11 +39,11 @@ class FakePaystackSession(SimpleNamespace):
     pass
 
 
-def fake_paystack_session():
+def fake_paystack_session(reference="ref_test_123"):
     return FakePaystackSession(
         authorization_url="https://paystack.test/authorize",
         access_code="ac_test_123",
-        reference="ref_test_123",
+        reference=reference,
     )
 
 
@@ -272,7 +272,7 @@ class FleetCrudTests(TestCase):
     def test_passenger_can_initiate_paystack_payment_for_pending_booking(self, mock_get_redis_client, mock_create_paystack_session):
         fake_client = FakeRedisClient()
         mock_get_redis_client.return_value = fake_client
-        mock_create_paystack_session.return_value = (fake_paystack_session(), None)
+        mock_create_paystack_session.side_effect = lambda booking: (fake_paystack_session(booking.payment_reference), None)
 
         passenger = get_user_model().objects.create_user(
             username="passenger-3@example.com",
@@ -306,7 +306,7 @@ class FleetCrudTests(TestCase):
         self.assertEqual(body["payment_status"], "INITIATED")
         self.assertEqual(body["authorization_url"], "https://paystack.test/authorize")
         self.assertEqual(body["access_code"], "ac_test_123")
-        self.assertEqual(body["reference"], "ref_test_123")
+        self.assertEqual(body["reference"], "tf-" + booking_code.replace("-", ""))
         self.assertEqual(body["qr_code"], expected_booking_qr_code(body["id"], passenger.id))
 
     @patch("fleet.views.parse_paystack_event")

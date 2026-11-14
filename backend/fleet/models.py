@@ -1,7 +1,13 @@
 import uuid
+from datetime import timedelta
 
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
+
+
+def booking_expiry():
+    return timezone.now() + timedelta(minutes=settings.BOOKING_HOLD_MINUTES)
 
 
 class BoatRoute(models.Model):
@@ -64,9 +70,12 @@ class Booking(models.Model):
     payment_status = models.CharField(max_length=20, default="PENDING")
     payment_reference = models.CharField(max_length=255, unique=True, null=True, blank=True)
     payment_url = models.URLField(blank=True)
+    payment_access_code = models.CharField(max_length=255, blank=True)
+    checkout_started_at = models.DateTimeField(null=True, blank=True)
     payment_currency = models.CharField(max_length=10, default="ngn")
     payment_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     paid_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(default=booking_expiry, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

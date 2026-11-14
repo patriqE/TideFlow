@@ -162,10 +162,11 @@ class PaymentVerificationTests(TestCase):
     def test_cancelled_booking_cannot_be_reconfirmed(self):
         Booking.objects.filter(pk=self.booking.pk).update(status=Booking.STATUS_CANCELLED)
         self.assertEqual(self.callback(self.evidence()).status_code, 409)
-        self.assertEqual(self.webhook({"event": "charge.success", "data": self.evidence()}).status_code, 409)
+        self.assertEqual(self.webhook({"event": "charge.success", "data": self.evidence()}).status_code, 200)
         self.booking.refresh_from_db()
         self.assertEqual(self.booking.status, Booking.STATUS_CANCELLED)
-        self.assertIsNone(self.booking.paid_at)
+        self.assertEqual(self.booking.payment_status, "REFUND_REQUIRED")
+        self.assertIsNotNone(self.booking.paid_at)
 
     def test_cancellation_during_provider_verification_is_not_overwritten(self):
         def verify(reference):
@@ -194,15 +195,32 @@ class PaymentVerificationTests(TestCase):
         self.assertEqual(other.status, Booking.STATUS_PENDING)
 
     @override_settings(PAYSTACK_SECRET_KEY="test-only-provider-secret")
+    def test_initialization_rejects_malformed_or_mismatched_provider_response(self):
+        valid = {"reference": self.booking.payment_reference, "authorization_url": "https://checkout.paystack.com/test",
+                 "access_code": "test-code"}
+        for body in ([], {"status": True, "data": []},
+                     *[{"status": True, "data": {**valid, field: value}} for field, value in (
+                         ("reference", "different-reference"), ("access_code", ""),
+                         ("authorization_url", "http://checkout.paystack.com/test"),
+                     )]):
+            with self.subTest(body=body):
+                with patch("fleet.payments.urlopen") as urlopen:
+                    urlopen.return_value.__enter__.return_value.read.return_value = json.dumps(body).encode()
+                    session, error = create_paystack_session(self.booking)
+                self.assertIsNone(session)
+                self.assertIsNotNone(error)
+
+    @override_settings(PAYSTACK_SECRET_KEY="test-only-provider-secret")
     def test_initialization_sends_booking_currency_amount_and_metadata(self):
         with patch("fleet.payments.urlopen") as urlopen:
             urlopen.return_value.__enter__.return_value.read.return_value = json.dumps({
                 "status": True, "data": {"authorization_url": "https://checkout.paystack.com/test",
-                "access_code": "test-access", "reference": "test-reference"},
+                "access_code": "test-access", "reference": self.booking.payment_reference},
             }).encode()
             session, error = create_paystack_session(self.booking)
         self.assertIsNone(error)
         payload = json.loads(urlopen.call_args.args[0].data)
         self.assertEqual(payload["amount"], 2550)
         self.assertEqual(payload["currency"], "NGN")
+        self.assertEqual(payload["reference"], self.booking.payment_reference)
         self.assertEqual(payload["metadata"]["booking_code"], str(self.booking.booking_code))
